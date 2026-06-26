@@ -1,0 +1,101 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * crypto.c - OpenSSL-backed AES-128 primitives.
+ */
+#include "crypto.h"
+#include "log.h"
+
+#include <string.h>
+#include <openssl/evp.h>
+#include <openssl/cmac.h>
+#include <openssl/rand.h>
+#include <openssl/params.h>
+
+static int cbc(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_BLOCK],
+               const uint8_t *in, size_t len, uint8_t *out, int enc)
+{
+    if (len % AES_BLOCK != 0) { LOGE("crypto: cbc len %zu not block-aligned", len); return -1; }
+    EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
+    if (!c) return -1;
+    int rc = -1, outl = 0;
+    if (EVP_CipherInit_ex(c, EVP_aes_128_cbc(), NULL, key, iv, enc) != 1) goto out;
+    EVP_CIPHER_CTX_set_padding(c, 0);
+    if (EVP_CipherUpdate(c, out, &outl, in, (int)len) != 1) goto out;
+    int fin = 0;
+    if (EVP_CipherFinal_ex(c, out + outl, &fin) != 1) goto out;
+    rc = 0;
+out:
+    EVP_CIPHER_CTX_free(c);
+    return rc;
+}
+
+int crypto_aes_cbc_encrypt(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_BLOCK],
+                           const uint8_t *in, size_t len, uint8_t *out)
+{
+    return cbc(key, iv, in, len, out, 1);
+}
+
+int crypto_aes_cbc_decrypt(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_BLOCK],
+                           const uint8_t *in, size_t len, uint8_t *out)
+{
+    return cbc(key, iv, in, len, out, 0);
+}
+
+int crypto_aes_ecb_encrypt(const uint8_t key[AES_KEY_LEN],
+                           const uint8_t in[AES_BLOCK], uint8_t out[AES_BLOCK])
+{
+    EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
+    if (!c) return -1;
+    int rc = -1, outl = 0;
+    if (EVP_EncryptInit_ex(c, EVP_aes_128_ecb(), NULL, key, NULL) != 1) goto out;
+    EVP_CIPHER_CTX_set_padding(c, 0);
+    if (EVP_EncryptUpdate(c, out, &outl, in, AES_BLOCK) != 1) goto out;
+    int fin = 0;
+    if (EVP_EncryptFinal_ex(c, out + outl, &fin) != 1) goto out;
+    rc = 0;
+out:
+    EVP_CIPHER_CTX_free(c);
+    return rc;
+}
+
+int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
+                    const uint8_t *data, size_t len, uint8_t out[AES_BLOCK])
+{
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
+    if (!mac) return -1;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    int rc = -1;
+    if (!ctx) goto out_mac;
+
+    char cipher[] = "AES-128-CBC";
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_utf8_string("cipher", cipher, 0),
+        OSSL_PARAM_construct_end(),
+    };
+    size_t outl = 0;
+    if (EVP_MAC_init(ctx, key, AES_KEY_LEN, params) != 1) goto out_ctx;
+    if (len && EVP_MAC_update(ctx, data, len) != 1) goto out_ctx;
+    if (EVP_MAC_final(ctx, out, &outl, AES_BLOCK) != 1) goto out_ctx;
+    rc = (outl == AES_BLOCK) ? 0 : -1;
+out_ctx:
+    EVP_MAC_CTX_free(ctx);
+out_mac:
+    EVP_MAC_free(mac);
+    return rc;
+}
+
+uint32_t crypto_crc32_desfire(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+    }
+    return crc;   /* JAMCRC: no final inversion */
+}
+
+int crypto_random(uint8_t *buf, size_t len)
+{
+    return RAND_bytes(buf, (int)len) == 1 ? 0 : -1;
+}
