@@ -71,9 +71,24 @@ uint32_t pn7160_desfire_storage_bytes(uint8_t storage_code);
  * D2760000850101, before authenticating. */
 int pn7160_desfire_select_iso_df(pn7160 *p, const uint8_t *aid, size_t aid_len);
 
+/* ISO 7816-4 SELECT by EF identifier (e.g. 0xE103 CC or 0xE104 NDEF) (#65). */
+int pn7160_desfire_select_iso_ef(pn7160 *p, uint16_t file_id);
+
+/* ISOReadBinary (#66) / ISOUpdateBinary (#67) on the currently selected EF.
+ * `offset` is the byte offset within the file; CommMode.Plain. */
+int pn7160_desfire_iso_read_binary(pn7160 *p, uint16_t offset, uint8_t length,
+                                   uint8_t *out, size_t out_cap, size_t *out_len);
+int pn7160_desfire_iso_update_binary(pn7160 *p, uint16_t offset,
+                                     const uint8_t *data, uint8_t length);
+
 /* AuthenticateEV2First with a 16-byte AES key. Establishes a secure session.
  * Returns PN7160_OK or PN7160_ERR (wrong key / not EV2-capable). */
 int pn7160_desfire_authenticate_ev2(pn7160 *p, uint8_t key_no, const uint8_t key[16]);
+
+/* AuthenticateEV2NonFirst (#64): re-authenticate within the active session
+ * (keeps TI and CmdCtr). Requires a session already established. */
+int pn7160_desfire_authenticate_nonfirst(pn7160 *p, uint8_t key_no,
+                                         const uint8_t key[16]);
 
 /* Recommended authentication entry point. Establishes a usable secure session
  * for subsequent metadata/file operations. Today this performs
@@ -105,6 +120,15 @@ int pn7160_desfire_get_card_uid(pn7160 *p, uint8_t uid[7]);
 /* GetFileSettings (MAC comm mode) of a file in the selected application. */
 int pn7160_desfire_get_file_settings(pn7160 *p, uint8_t file_no, uint8_t *out,
                                      size_t out_cap, size_t *out_len);
+
+/* GetFileCounters (#69): the SDMReadCtr (monotonic tap counter) of an
+ * SDM-enabled file. Requires a secure session. */
+int pn7160_desfire_get_file_counters(pn7160 *p, uint8_t file_no, uint32_t *sdm_read_ctr);
+
+/* SetConfiguration (#70): option byte + data, CommMode.Full. DANGER: several
+ * options are one-way (Random ID enable, LRP mode). Requires a session. */
+int pn7160_desfire_set_configuration(pn7160 *p, uint8_t option,
+                                     const uint8_t *data, size_t data_len);
 
 int pn7160_desfire_change_file_settings(pn7160 *p, uint8_t comm, uint8_t file_no,
                                         uint8_t file_option, uint16_t access_rights,

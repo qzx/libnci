@@ -55,6 +55,27 @@ static int build_iv(const desfire_ev2_session *s, uint8_t l0, uint8_t l1,
     return crypto_aes_ecb_encrypt(s->ses_enc, block, iv);
 }
 
+/* SesAuthENC/SesAuthMAC from Kx, RndA, RndB (SP800-108 CMAC; same for First and
+ * NonFirst). SV1/SV2 share the 26-byte tail built from the two challenges. */
+static int derive_session_keys(const uint8_t key[16], const uint8_t rnda[16],
+                               const uint8_t rndb[16], desfire_ev2_session *s)
+{
+    uint8_t tail[26];
+    memcpy(tail, rnda, 2);
+    for (int i = 0; i < 6; i++) tail[2 + i] = rnda[2 + i] ^ rndb[i];
+    memcpy(tail + 8, rndb + 6, 10);
+    memcpy(tail + 18, rnda + 8, 8);
+
+    uint8_t sv[32];
+    static const uint8_t h1[6] = { 0xA5, 0x5A, 0x00, 0x01, 0x00, 0x80 };
+    static const uint8_t h2[6] = { 0x5A, 0xA5, 0x00, 0x01, 0x00, 0x80 };
+    memcpy(sv, h1, 6); memcpy(sv + 6, tail, 26);
+    if (crypto_aes_cmac(key, sv, 32, s->ses_enc) != 0) return PN7160_ERR;
+    memcpy(sv, h2, 6); memcpy(sv + 6, tail, 26);
+    if (crypto_aes_cmac(key, sv, 32, s->ses_mac) != 0) return PN7160_ERR;
+    return PN7160_OK;
+}
+
 int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
                              const uint8_t key[16], desfire_ev2_session *s)
 {
@@ -106,20 +127,7 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
         return PN7160_ERR;
     }
 
-    /* Session-vector tail shared by SV1/SV2. */
-    uint8_t tail[26];
-    memcpy(tail, rnda, 2);
-    for (int i = 0; i < 6; i++) tail[2 + i] = rnda[2 + i] ^ rndb[i];
-    memcpy(tail + 8, rndb + 6, 10);
-    memcpy(tail + 18, rnda + 8, 8);
-
-    uint8_t sv[32];
-    static const uint8_t h1[6] = { 0xA5, 0x5A, 0x00, 0x01, 0x00, 0x80 };
-    static const uint8_t h2[6] = { 0x5A, 0xA5, 0x00, 0x01, 0x00, 0x80 };
-    memcpy(sv, h1, 6); memcpy(sv + 6, tail, 26);
-    if (crypto_aes_cmac(key, sv, 32, s->ses_enc) != 0) return PN7160_ERR;
-    memcpy(sv, h2, 6); memcpy(sv + 6, tail, 26);
-    if (crypto_aes_cmac(key, sv, 32, s->ses_mac) != 0) return PN7160_ERR;
+    if (derive_session_keys(key, rnda, rndb, s) != PN7160_OK) return PN7160_ERR;
 
     memcpy(s->ti, plain, 4);
     s->cmd_ctr = 0;
@@ -127,6 +135,60 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
     s->active = true;
     LOGD("ev2: authenticated key %u, TI %02x%02x%02x%02x",
          key_no, s->ti[0], s->ti[1], s->ti[2], s->ti[3]);
+    return PN7160_OK;
+}
+
+/* AuthenticateEV2NonFirst (0x77): re-key within an active transaction. Unlike
+ * First it exchanges no caps, keeps the TI, and does NOT reset CmdCtr; the Part2
+ * response is just E(RndA'). Requires a live session. (NTAG 424 §9.1.6.) */
+int desfire_ev2_authenticate_nonfirst(apdu_fn fn, void *ctx, uint8_t key_no,
+                                      const uint8_t key[16], desfire_ev2_session *s)
+{
+    if (!s || !s->active) { LOGE("ev2: NonFirst needs an active session"); return PN7160_ERR; }
+    uint8_t saved_ti[4]; memcpy(saved_ti, s->ti, 4);
+    uint16_t saved_ctr = s->cmd_ctr;
+
+    const uint8_t zero_iv[16] = {0};
+    uint8_t resp[64]; size_t rn = 0; uint8_t status = 0;
+
+    /* Part 1: 0x77 || KeyNo -> E(RndB). */
+    uint8_t p1[1] = { key_no };
+    if (desfire_apdu_raw(fn, ctx, 0x77, p1, 1, resp, sizeof resp, &rn, &status) != PN7160_OK)
+        return PN7160_ERR;
+    if (status != ST_AF || rn != 16) {
+        LOGE("ev2: AuthNonFirst part1 status 0x91%02x len %zu", status, rn);
+        s->active = false; return PN7160_ERR;
+    }
+    uint8_t rndb[16];
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, rndb) != 0) return PN7160_ERR;
+
+    /* Part 2: E(RndA || RndB<<<1) -> E(RndA'). */
+    uint8_t rnda[16];
+    if (crypto_random(rnda, 16) != 0) return PN7160_ERR;
+    uint8_t both[32];
+    memcpy(both, rnda, 16); memcpy(both + 16, rndb, 16); rotl1(both + 16, 16);
+    uint8_t enc[32];
+    if (crypto_aes_cbc_encrypt(key, zero_iv, both, 32, enc) != 0) return PN7160_ERR;
+    if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, enc, 32, resp, sizeof resp, &rn, &status) != PN7160_OK)
+        return PN7160_ERR;
+    if (status != ST_OK || rn != 16) {
+        LOGE("ev2: AuthNonFirst part2 status 0x91%02x len %zu (wrong key?)", status, rn);
+        s->active = false; return PN7160_ERR;
+    }
+    uint8_t plain[16];
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, plain) != 0) return PN7160_ERR;
+    uint8_t rnda_rot[16]; memcpy(rnda_rot, rnda, 16); rotl1(rnda_rot, 16);
+    if (memcmp(plain, rnda_rot, 16) != 0) {
+        LOGE("ev2: NonFirst proof (RndA') mismatch");
+        s->active = false; return PN7160_ERR;
+    }
+    if (derive_session_keys(key, rnda, rndb, s) != PN7160_OK) return PN7160_ERR;
+
+    memcpy(s->ti, saved_ti, 4);   /* TI and CmdCtr are preserved across NonFirst */
+    s->cmd_ctr = saved_ctr;
+    s->key_no = key_no;
+    s->active = true;
+    LOGD("ev2: re-authenticated (NonFirst) key %u, TI kept, CmdCtr %u", key_no, s->cmd_ctr);
     return PN7160_OK;
 }
 
@@ -618,5 +680,32 @@ int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session 
     uint8_t out[16]; size_t rn = 0;
     return desfire_ev2_transact(fn, ctx, s, 0x5F, &file_no, 1, p, i,
                                 comm == DF_COMM_FULL, false, out, sizeof out, &rn);
+}
+
+/* GetFileCounters (0xF6), CommMode.Full: returns the SDMReadCtr of an
+ * SDM-enabled file (the monotonic tap counter). (NTAG 424 §10.7.3.) */
+int desfire_ev2_get_file_counters(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                  uint8_t file_no, uint32_t *sdm_read_ctr)
+{
+    uint8_t out[32]; size_t n = 0;
+    if (desfire_ev2_transact(fn, ctx, s, 0xF6, &file_no, 1, NULL, 0,
+                             false, true, out, sizeof out, &n) != PN7160_OK)
+        return PN7160_ERR;
+    if (n < 3) { LOGE("ev2: GetFileCounters short (%zu)", n); return PN7160_ERR; }
+    if (sdm_read_ctr)
+        *sdm_read_ctr = (uint32_t)out[0] | ((uint32_t)out[1] << 8) |
+                        ((uint32_t)out[2] << 16);   /* SDMReadCtr, LSB first */
+    return PN7160_OK;
+}
+
+/* SetConfiguration (0x5C), CommMode.Full: option byte + option-specific data.
+ * DANGER: several options are one-way (e.g. enabling Random ID, switching to LRP
+ * mode) - the caller is responsible for the payload. (NTAG 424 §10.8.) */
+int desfire_ev2_set_configuration(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                  uint8_t option, const uint8_t *data, size_t data_len)
+{
+    uint8_t out[16]; size_t rn = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0x5C, &option, 1, data, data_len,
+                                true /* CommMode.Full */, false, out, sizeof out, &rn);
 }
 

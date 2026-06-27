@@ -37,6 +37,11 @@ typedef struct {
 int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
                              const uint8_t key[16], desfire_ev2_session *s);
 
+/* AuthenticateEV2NonFirst: re-key within the active transaction (keeps TI and
+ * CmdCtr). Requires *s to already be a live session. */
+int desfire_ev2_authenticate_nonfirst(apdu_fn fn, void *ctx, uint8_t key_no,
+                                      const uint8_t key[16], desfire_ev2_session *s);
+
 /* Generic in-session command:
  *   cmd_header : sent plain, covered by the command MAC
  *   cmd_data   : encrypted (full TX) when tx_enc, else appended plain
@@ -132,6 +137,15 @@ int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session 
                                      uint8_t comm, uint8_t file_no, uint8_t file_option,
                                      uint16_t access_rights,
                                      const uint8_t *sdm_data, size_t sdm_len);
+
+/* GetFileCounters (0xF6): SDMReadCtr of an SDM-enabled file. */
+int desfire_ev2_get_file_counters(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                  uint8_t file_no, uint32_t *sdm_read_ctr);
+
+/* SetConfiguration (0x5C): option byte + data, CommMode.Full. DANGER: some
+ * options are irreversible (Random ID, LRP mode). */
+int desfire_ev2_set_configuration(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                  uint8_t option, const uint8_t *data, size_t data_len);
 
 #endif /* PN7160_DESFIRE_EV2_H */
 

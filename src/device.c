@@ -775,6 +775,50 @@ int pn7160_desfire_select_iso_df(pn7160 *p, const uint8_t *aid, size_t aid_len)
     return (rx[n - 2] == 0x90 && rx[n - 1] == 0x00) ? PN7160_OK : PN7160_ERR;
 }
 
+int pn7160_desfire_select_iso_ef(pn7160 *p, uint16_t file_id)
+{
+    if (!p || !pn7160_tag_supports_apdu(p)) return PN7160_ERR;
+    /* ISOSelectFile by EF identifier: P1=00 (select by FID), P2=0C (no FCI). */
+    uint8_t cmd[7] = { 0x00, 0xA4, 0x00, 0x0C, 0x02,
+                       (uint8_t)(file_id >> 8), (uint8_t)(file_id & 0xFF) };
+    uint8_t rx[64];
+    int n = pn7160_transceive(p, cmd, sizeof cmd, rx, sizeof rx, 1000);
+    if (n < 2) return PN7160_ERR;
+    return (rx[n - 2] == 0x90 && rx[n - 1] == 0x00) ? PN7160_OK : PN7160_ERR;
+}
+
+int pn7160_desfire_iso_read_binary(pn7160 *p, uint16_t offset, uint8_t length,
+                                   uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!p || !pn7160_tag_supports_apdu(p)) return PN7160_ERR;
+    /* ISOReadBinary (00 B0): P1P2 = offset (b8 of P1 = 0 -> EF already selected). */
+    uint8_t cmd[5] = { 0x00, 0xB0, (uint8_t)(offset >> 8), (uint8_t)(offset & 0xFF), length };
+    uint8_t rx[256];
+    int n = pn7160_transceive(p, cmd, sizeof cmd, rx, sizeof rx, 1000);
+    if (n < 2 || rx[n - 2] != 0x90 || rx[n - 1] != 0x00) return PN7160_ERR;
+    size_t dl = (size_t)(n - 2);
+    if (dl > out_cap) dl = out_cap;
+    if (out) memcpy(out, rx, dl);
+    if (out_len) *out_len = dl;
+    return PN7160_OK;
+}
+
+int pn7160_desfire_iso_update_binary(pn7160 *p, uint16_t offset,
+                                     const uint8_t *data, uint8_t length)
+{
+    if (!p || !pn7160_tag_supports_apdu(p) || (!data && length)) return PN7160_ERR;
+    /* ISOUpdateBinary (00 D6): P1P2 = offset, Lc = length, then the data. */
+    uint8_t cmd[5 + 255]; size_t i = 0;
+    cmd[i++] = 0x00; cmd[i++] = 0xD6;
+    cmd[i++] = (uint8_t)(offset >> 8); cmd[i++] = (uint8_t)(offset & 0xFF);
+    cmd[i++] = length;
+    memcpy(cmd + i, data, length); i += length;
+    uint8_t rx[16];
+    int n = pn7160_transceive(p, cmd, i, rx, sizeof rx, 1000);
+    if (n < 2) return PN7160_ERR;
+    return (rx[n - 2] == 0x90 && rx[n - 1] == 0x00) ? PN7160_OK : PN7160_ERR;
+}
+
 int pn7160_desfire_authenticate_ev2(pn7160 *p, uint8_t key_no, const uint8_t key[16])
 {
     if (!p || !pn7160_tag_supports_apdu(p)) return PN7160_ERR;
@@ -782,6 +826,13 @@ int pn7160_desfire_authenticate_ev2(pn7160 *p, uint8_t key_no, const uint8_t key
     if (r == PN7160_OK)
         p->ev2.frame_size = p->conn.frame_size;
     return r;
+}
+
+int pn7160_desfire_authenticate_nonfirst(pn7160 *p, uint8_t key_no,
+                                         const uint8_t key[16])
+{
+    if (!p || !p->ev2.active) return PN7160_ERR;
+    return desfire_ev2_authenticate_nonfirst(facade_apdu, p, key_no, key, &p->ev2);
 }
 
 int pn7160_desfire_authenticate(pn7160 *p, uint8_t key_no, const uint8_t key[16])
@@ -827,6 +878,19 @@ int pn7160_desfire_change_file_settings(pn7160 *p, uint8_t comm, uint8_t file_no
     if (!p || !p->ev2.active) return PN7160_ERR;
     return desfire_ev2_change_file_settings(facade_apdu, p, &p->ev2, comm, file_no,
                                             file_option, access_rights, sdm_data, sdm_len);
+}
+
+int pn7160_desfire_get_file_counters(pn7160 *p, uint8_t file_no, uint32_t *sdm_read_ctr)
+{
+    if (!p || !p->ev2.active) return PN7160_ERR;
+    return desfire_ev2_get_file_counters(facade_apdu, p, &p->ev2, file_no, sdm_read_ctr);
+}
+
+int pn7160_desfire_set_configuration(pn7160 *p, uint8_t option,
+                                     const uint8_t *data, size_t data_len)
+{
+    if (!p || !p->ev2.active) return PN7160_ERR;
+    return desfire_ev2_set_configuration(facade_apdu, p, &p->ev2, option, data, data_len);
 }
 
 

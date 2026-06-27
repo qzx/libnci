@@ -183,18 +183,20 @@ byte-for-byte intact.
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
 | 63 | AuthenticateEV2First | ✅hw | validated on a real NTAG 424 DNA (factory key 0) |
-| 64 | AuthenticateEV2NonFirst | ⬜ | |
-| 65 | ISO SELECT by DF name | ✅hw | `pn7160_desfire_select_iso_df` (NDEF app D2760000850101) |
-| 66–67 | ISO Read/Update Binary | ✅hw | `ntag424-provision` writes the NDEF file via ISO SELECT EF + UPDATE BINARY |
+| 64 | AuthenticateEV2NonFirst | ✅hw | `pn7160_desfire_authenticate_nonfirst` (0x77, keeps TI/CmdCtr); live: re-auth mid-session, GetCardUID returns the same UID |
+| 65 | ISO SELECT by DF / EF | ✅hw | `..._select_iso_df` (DF name) **and** `..._select_iso_ef` (EF id 0xE103/0xE104); live SELECT E104 |
+| 66 | ISOReadBinary | ✅hw | `pn7160_desfire_iso_read_binary` (00 B0); live: read the NDEF file (NLEN + SUN URL) |
+| 67 | ISOUpdateBinary | ✅hw | `pn7160_desfire_iso_update_binary` (00 D6); the path `ntag424-provision` uses to write the NDEF file |
 | 68 | ChangeFileSettings (+SDM) | ✅hw | `pn7160_desfire_change_file_settings`, `hci_sdm_encode_settings`; SDM enabled on a real tag |
-| 69 | ReadCounter (SDM) | ✅hw | recovered from the live SUN PICCData (counter seen incrementing 42→43→45) |
-| 70 | SetConfiguration | ⬜ | |
+| 69 | ReadCounter (SDM) | ✅hw | `pn7160_desfire_get_file_counters` (native 0xF6, CommMode.Full) - secure exchange validated live (card returns a valid status); counter value also recovered via the SUN PICCData (seen incrementing) |
+| 70 | SetConfiguration | 🟢 | `pn7160_desfire_set_configuration` (0x5C, CommMode.Full) via the validated EV2 transact path. **Deliberately not executed on the live tag**: its options (Random ID, LRP enable, ...) are one-way |
 | 71 | **SDM SUN decode** | ✅hw | `hci_sdm_decrypt_picc`, `hci_sdm_verify`; real tag UID recovered |
 | 72 | **SDM CMAC verify** | ✅hw | `hci_sdm_mac` truncated-CMAC; VALID on live taps |
 | 73 | **SDM EncFileData decrypt** | ✅ | `hci_sdm_decrypt_file_data` (test_sdm; not exercised by this tag's config) |
-| 74 | LRP mode auth | ⬜ | |
+| 74 | LRP mode auth | ⬜ | Deferred. The LRP primitive is specified in NXP AN12304 (not in-repo) and **LRP mode is a one-way SetConfiguration switch**, so it can be neither vector-verified nor hardware-validated here. Not shipping unverified crypto - needs AN12304 + its test vectors |
 
 `ntag424-sdm` CLI verifies a scanned SUN URL offline (UID + counter + MAC + enc data).
+#63-73 are complete; #74 (LRP) is the sole deferred item for the reasons above.
 
 ## 9. DESFire EV3
 | # | Feature | Status | Where |
