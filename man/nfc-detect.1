@@ -1,0 +1,33 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH NFC-DETECT 1 "2026-06-27" "libnci 1.0.0-alpha.1" "libnci manual"
+.SH NAME
+nfc-detect \- poll for any NFC tag and print its UID
+.SH SYNOPSIS
+.B nfc-detect
+.RI [ options ]
+.SH DESCRIPTION
+.B nfc-detect
+brings up an NCI controller and polls across NFC-A/B/F/V, printing the UID of
+each tag it sees. It is the smallest end-to-end check that the controller and
+wiring are working.
+.SH OPTIONS
+.TP
+.BI --chip " PATH"
+GPIO chip device node; autodetected when omitted.
+.TP
+.BI --bus " PATH"
+I2C bus device node (default: /dev/i2c-1).
+.TP
+.BI --dwl " N"
+GPIO line offset for the firmware-download (DWL) pin.
+.SH ENVIRONMENT
+.TP
+.B NCI_LOG
+Log verbosity 0\(en5.
+.SH EXIT STATUS
+0 on a clean exit, non-zero if the device could not be opened.
+.SH SEE ALSO
+.BR nfc-poll (1),
+.BR nfc-read-ndef (1)
+.SH AUTHOR
+Part of the libnci NFC stack.

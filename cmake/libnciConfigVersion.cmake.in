@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Version compatibility file for find_package(libnci). @VERSION@
+# CMake compares numeric components only, so the pre-release suffix (-alpha.N)
+# is intentionally dropped here; PACKAGE_VERSION carries the numeric base.
+set(PACKAGE_VERSION "@VERSION_NUMERIC@")
+
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_VERSION VERSION_EQUAL PACKAGE_FIND_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()

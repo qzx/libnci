@@ -1,0 +1,28 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH NTAG424-SDM 1 "2026-06-27" "libnci 1.0.0-alpha.1" "libnci manual"
+.SH NAME
+ntag424-sdm \- verify a Secure Unique NFC (SUN) message from an NTAG 424 DNA
+.SH SYNOPSIS
+.B ntag424-sdm
+.RI [ options ]
+.IR URL | mirror-data
+.SH DESCRIPTION
+.B ntag424-sdm
+parses and cryptographically verifies the SDM / SUN data produced by an
+NTAG 424 DNA tap: the encrypted PICCData (UID + read counter), the optional
+encrypted file data, and the truncated SDMMAC. Given the relevant AES keys it
+decrypts the PICCData to recover the real UID and monotonic counter and reports
+whether the SDMMAC is VALID. It is an offline verifier \(em no NFC hardware is
+required \(em suitable for the server side of a tap-to-verify flow.
+.SH OPTIONS
+See
+.B ntag424-sdm --help
+for the full set of key and offset options, which mirror the SDM file
+configuration written by
+.BR ntag424-provision (1).
+.SH EXIT STATUS
+0 if the SUN message verified, non-zero on a parse failure or an invalid MAC.
+.SH SEE ALSO
+.BR nfc-read-ndef (1)
+.SH AUTHOR
+Part of the libnci NFC stack.

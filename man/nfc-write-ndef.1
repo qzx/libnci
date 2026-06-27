@@ -1,0 +1,73 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH NFC-WRITE-NDEF 1 "2026-06-27" "libnci 1.0.0-alpha.1" "libnci manual"
+.SH NAME
+nfc-write-ndef \- write an NDEF message to a Type 4 tag
+.SH SYNOPSIS
+.B nfc-write-ndef
+.RB ( --uri
+.IR URI " | "
+.B --text
+.IR TEXT " [" --lang " " LL "] | "
+.BR --format )
+.RI [ --read-only "] [" options ]
+.SH DESCRIPTION
+.B nfc-write-ndef
+builds a URI or Text NDEF record (or prepares an empty message), waits for a
+writable NFC Forum Type 4 tag and writes it. The write order is NLEN=0, then
+the message, then NLEN, so a concurrent reader never observes a partial
+message. After a successful write the message is read back and compared unless
+.B --no-verify
+is given. The operation is performed on the first suitable tag, then the tool
+exits.
+.SH OPTIONS
+.SS Content (choose one)
+.TP
+.BI --uri " URI"
+Write a single URI record (common schemes are abbreviated per the NFC Forum
+URI table).
+.TP
+.BI --text " TEXT"
+Write a single UTF-8 Text record.
+.TP
+.BI --lang " LL"
+IANA language code for
+.BR --text " (default: " en ).
+.TP
+.B --format
+Reset the tag to an empty NDEF message (NLEN=0).
+.SS Modifiers
+.TP
+.B --read-only
+Make the NDEF file read-only after any write (sets the CC write access to
+0xFF). Irreversible on tags that lock the CC.
+.TP
+.B --no-verify
+Skip the post-write read-back check.
+.SS Device
+.TP
+.BI --chipset " NAME"
+Controller driver to use.
+.TP
+.BI --bus " PATH" ", " --addr " HEX" ", " --chip " PATH"
+I2C bus, controller address and GPIO chip.
+.TP
+.BI --ven " N" ", " --irq " N" ", " --dwl " N"
+GPIO line offsets for VEN, IRQ and DWL.
+.TP
+.BR -h ", " --help
+Print usage and exit.
+.SH EXIT STATUS
+0 if the operation completed on a tag, non-zero on bad arguments, a device-open
+failure, or a write/lock error.
+.SH EXAMPLES
+.nf
+nfc-write-ndef --uri https://qzx.is
+nfc-write-ndef --text "hello world" --lang en
+nfc-write-ndef --format
+nfc-write-ndef --uri https://qzx.is --read-only
+.fi
+.SH SEE ALSO
+.BR nfc-read-ndef (1),
+.BR nfc-poll (1)
+.SH AUTHOR
+Part of the libnci NFC stack.

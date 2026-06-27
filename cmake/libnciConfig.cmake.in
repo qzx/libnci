@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# CMake package configuration for libnci (@VERSION@) — impl.txt #141
+#
+# Lets CMake projects consume the installed libnci as a proper package:
+#
+#   find_package(libnci CONFIG REQUIRED)
+#   target_link_libraries(my_app PRIVATE libnci::nci)
+#
+# This file is installed to <libdir>/cmake/libnci/ by `meson install`, so
+# find_package(libnci CONFIG) locates it without any extra CMAKE_PREFIX_PATH
+# when libnci is under a standard prefix (/usr, /usr/local).
+
+include(CMakeFindDependencyMacro)
+find_dependency(OpenSSL)
+find_dependency(Threads)
+
+# libgpiod ships no CMake module; surface it through pkg-config when available
+# so static links resolve. A consumer can also rely on the .so's own NEEDED.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(libnci_GPIOD QUIET libgpiod)
+endif()
+
+set(libnci_VERSION "@VERSION@")
+set(libnci_INCLUDE_DIRS "@includedir@")
+set(libnci_LIBRARY_DIRS "@libdir@")
+
+find_library(libnci_LIBRARY
+  NAMES nci
+  PATHS "@libdir@"
+  NO_DEFAULT_PATH)
+if(NOT libnci_LIBRARY)
+  find_library(libnci_LIBRARY NAMES nci)
+endif()
+set(libnci_LIBRARIES "${libnci_LIBRARY}")
+
+if(libnci_LIBRARY AND NOT TARGET libnci::nci)
+  add_library(libnci::nci UNKNOWN IMPORTED)
+  set_target_properties(libnci::nci PROPERTIES
+    IMPORTED_LOCATION "${libnci_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "@includedir@"
+    INTERFACE_LINK_LIBRARIES "OpenSSL::Crypto;Threads::Threads")
+  if(libnci_GPIOD_LIBRARIES)
+    set_property(TARGET libnci::nci APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES ${libnci_GPIOD_LIBRARIES})
+  endif()
+endif()
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(libnci
+  REQUIRED_VARS libnci_LIBRARY libnci_INCLUDE_DIRS
+  VERSION_VAR libnci_VERSION)

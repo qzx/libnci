@@ -1,7 +1,13 @@
 project('nci', 'c',
-  version: '0.2.0',
+  version: '1.0.0-alpha.1',
   license: 'Apache-2.0',
-  default_options: ['c_std=c11', 'warning_level=3', 'werror=false'])
+  default_options: ['c_std=c11', 'warning_level=3', 'werror=false',
+                    'default_library=both'])
+
+# Numeric base of the version (drop any -alpha/-rc suffix) for places that
+# require a strictly numeric version: the shared-object soname and CMake's
+# version-compatibility check.
+version_numeric = meson.project_version().split('-')[0]
 
 libgpiod  = dependency('libgpiod', version: '>=2.0')
 libcrypto = dependency('libcrypto', version: '>=3.0')   # OpenSSL: AES/CMAC
@@ -22,8 +28,14 @@ nci_sources = [
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
 ]
 
-nci_lib = static_library('nci',
+# A proper versioned library (impl.txt #138). default_library=both builds the
+# shared .so (with an soname) and the static .a; the soname carries soversion 0
+# to signal the alpha's ABI is not yet stable. `library()` lets downstreams link
+# either form; apps below link against whichever is the default.
+nci_lib = library('nci',
   nci_sources,
+  version: version_numeric,   # full .so.X.Y.Z symlink
+  soversion: '0',             # SONAME: libnci.so.0 (unstable ABI during alpha)
   include_directories: inc_all,
   dependencies: [libgpiod, libcrypto, libthreads],
   install: true)
@@ -37,7 +49,8 @@ hcinfc_dep = nci_dep
 pn7160_dep = nci_dep
 
 # --- demo / CLI apps -------------------------------------------------------
-foreach app : ['nfc-detect', 'nfc-read-ndef', 'desfire-info', 'desfire-auth',
+foreach app : ['nfc-detect', 'nfc-read-ndef', 'nfc-write-ndef',
+               'desfire-info', 'desfire-auth',
                'desfire-manage', 'desfire-ev3-test', 'desfire-session-test',
                'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision',
                'desfire-dam']
@@ -51,12 +64,45 @@ endforeach
 # --- installed headers + pkg-config (impl.txt #137, #139) -----------------
 install_subdir('include/nci', install_dir: get_option('includedir'))
 
+# pkg-config: downstreams do `pkg-config --cflags --libs libnci`. The private
+# requirements let a *static* link resolve the whole transitive closure
+# (OpenSSL + libgpiod + pthread) without the consumer naming them.
 import('pkgconfig').generate(nci_lib,
   name: 'libnci',
   description: 'Modern NFC reader/writer stack (PN7160 and other NCI controllers)',
   subdirs: '.',
-  requires_private: ['libcrypto'],
+  requires_private: ['libcrypto', 'libgpiod'],
+  libraries_private: ['-pthread'],
   extra_cflags: [])
+
+# --- man pages (impl.txt #139) --------------------------------------------
+install_man(
+  'man/nfc-detect.1', 'man/nfc-poll.1',
+  'man/nfc-read-ndef.1', 'man/nfc-write-ndef.1',
+  'man/ntag424-sdm.1')
+
+# --- CMake package config (impl.txt #141) ---------------------------------
+# So CMake projects can `find_package(libnci CONFIG REQUIRED)` and link the
+# imported target `libnci::nci`. Installed next to the lib under cmake/libnci/.
+cmake_conf = configuration_data()
+cmake_conf.set('VERSION',         meson.project_version())
+cmake_conf.set('VERSION_NUMERIC', version_numeric)
+cmake_conf.set('includedir', get_option('prefix') / get_option('includedir'))
+cmake_conf.set('libdir',     get_option('prefix') / get_option('libdir'))
+
+cmake_install_dir = get_option('libdir') / 'cmake' / 'libnci'
+configure_file(
+  input:         'cmake/libnciConfig.cmake.in',
+  output:        'libnciConfig.cmake',
+  configuration: cmake_conf,
+  install:       true,
+  install_dir:   cmake_install_dir)
+configure_file(
+  input:         'cmake/libnciConfigVersion.cmake.in',
+  output:        'libnciConfigVersion.cmake',
+  configuration: cmake_conf,
+  install:       true,
+  install_dir:   cmake_install_dir)
 
 # --- unit tests: pure layers, no libgpiod, no hardware --------------------
 test_nci = executable('test_nci',

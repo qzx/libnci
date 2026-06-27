@@ -1,0 +1,62 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH NFC-POLL 1 "2026-06-27" "libnci 1.0.0-alpha.1" "libnci manual"
+.SH NAME
+nfc-poll \- detect NFC tags and print their type and UID
+.SH SYNOPSIS
+.B nfc-poll
+.RI [ options ]
+.SH DESCRIPTION
+.B nfc-poll
+starts RF discovery on an NCI controller (PN7160 by default) and prints the
+protocol, UID and basic attributes of every tag brought into the field. When
+several tags are present at once it cycles through them. It exercises the
+generic
+.I nci_*
+API: selective technology polling, multi-tag selection and structured errors.
+.SH OPTIONS
+.TP
+.BI --chipset " NAME"
+Controller driver to use (default: the autoprobed default).
+.TP
+.BI --tech " ABFV"
+Restrict polling to the given technologies; any subset of
+.BR A ", " B ", " F ", " V
+(default: all).
+.TP
+.B --list
+List the compiled-in chipset drivers and exit.
+.TP
+.BI --bus " PATH"
+I2C bus device node (default: /dev/i2c-1).
+.TP
+.BI --addr " HEX"
+I2C address of the controller (default: 0x28).
+.TP
+.BI --chip " PATH"
+GPIO chip device node; autodetected when omitted.
+.TP
+.BI --ven " N" ", " --irq " N" ", " --dwl " N"
+GPIO line offsets for the VEN (reset), IRQ (data-ready) and DWL
+(firmware-download) signals.
+.TP
+.BR -h ", " --help
+Print usage and exit.
+.SH ENVIRONMENT
+.TP
+.B NCI_LOG
+Log verbosity 0\(en5 (silent, error, warn, info, NCI frames, raw bytes).
+.SH EXIT STATUS
+0 on a clean exit (Ctrl-C), non-zero if the device could not be opened or
+discovery failed.
+.SH EXAMPLES
+.nf
+nfc-poll
+nfc-poll --tech A --list
+NCI_LOG=4 nfc-poll
+.fi
+.SH SEE ALSO
+.BR nfc-detect (1),
+.BR nfc-read-ndef (1),
+.BR nfc-write-ndef (1)
+.SH AUTHOR
+Part of the libnci NFC stack.

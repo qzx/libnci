@@ -227,7 +227,7 @@ MAC/Full command exchange.
 | 98 | CreateTransactionMACFile | ✅hw | `nci_desfire_create_transaction_mac_file` (0xCE, Full; key enciphered) |
 | 99 | Read TransactionMAC file | ✅hw | `nci_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
 | 100 | Proximity Check | ✅hw | `nci_desfire_proximity_check`. Live on the EV3, 3/3 stable: PreparePC → ProximityCheck (8-byte RndC/RndR) → VerifyPC with `trunc_even(AES-CMAC(VC/PC-key=all-zero, 0xFD‖OPT‖pubRespTime‖RndR[8]‖RndC[8]))` - the card **accepts the reader MAC** (anti-relay check passes), pubRespTime=0x0320 recovered. Key fixes vs the failed blind crack: the **VC/PC key** (not session key) and an **8-byte** challenge (`MFDES_PC_CHALLENGE_LEN`). Card's own response-MAC layout not yet pinned (exposed via `card_mac`) |
-| 101 | Delegated App Mgmt | 🟢 implemented + read-validated; create gated by NXP's keys | **`apps/desfire-dam.c`** CLI (scan/info/create/delete/lifecycle) + **`src/desfire_dam.c`** (appdata/cryptogram/DAMMAC builder ported clean-room from Proxmark3, CreateDelegatedApplication 0xC9 as C9+AF, GetDelegatedInfo 0x69). **GetDelegatedInfo validated** live (2-byte slot; slot → 0xA0 not-provisioned). **CreateDelegatedApplication un-validatable on this card**: the datasheet states the DAM keys are *"Factory loaded NXP's DAM keys for AppXplorer service support"* — i.e. **NXP-proprietary, NDA/service-only**. Empirically the DAMAuthKey (0x10) auth is denied **0x9D PERMISSION_DENIED** for *every* method (EV2First/ISO/legacy/AES) and *even inside a valid PICC-master session*; the keys can't be changed without knowing them (ChangeKey of a different key needs the old key). Validating create needs a card personalised with known DAM keys (NXP AppXplorer service). Command format/crypto/CLI are complete + Proxmark3-verified. See [PC_DAM_REVERSE_ENGINEERING.md](PC_DAM_REVERSE_ENGINEERING.md) |
+| 101 | Delegated App Mgmt | 🟢 implemented + read-validated; create gated by NXP's keys | **`apps/desfire-dam.c`** CLI (scan/info/create/delete/lifecycle) + **`src/desfire_dam.c`** (appdata/cryptogram/DAMMAC builder ported clean-room from Proxmark3, CreateDelegatedApplication 0xC9 as C9+AF, GetDelegatedInfo 0x69). **GetDelegatedInfo validated** live (2-byte slot; slot → 0xA0 not-provisioned). **CreateDelegatedApplication un-validatable on this card**: the datasheet states the DAM keys are *"Factory loaded NXP's DAM keys for AppXplorer service support"* — i.e. **NXP-proprietary, NDA/service-only**. Empirically the DAMAuthKey (0x10) auth is denied **0x9D PERMISSION_DENIED** for *every* method (EV2First/ISO/legacy/AES) and *even inside a valid PICC-master session*; the keys can't be changed without knowing them (ChangeKey of a different key needs the old key). Validating create needs a card personalised with known DAM keys (NXP AppXplorer service). Command format/crypto/CLI are complete + Proxmark3-verified. See [PC_DAM_REVERSE_ENGINEERING.md](../reference/PC_DAM_REVERSE_ENGINEERING.md) and [protocols/DESFIRE.md](protocols/DESFIRE.md#6-delegated-application-management-dam) |
 | 102 | SetConfiguration ext | ✅hw | `nci_desfire_set_configuration` (0x5C, Full); same command as NTAG #70, executed live |
 | 103 | LRP mode | ✅hw | shared LRP implementation (`src/lrp.c`, `src/desfire_lrp.c`); crypto vector-validated and AuthenticateLRPFirst validated on a real tag in LRP mode (see NTAG #74) |
 
@@ -280,18 +280,18 @@ Still deferred: #100 (RF-timed proximity, needs NFCC support), #101 (DAM).
 ## 15. Build & packaging
 | # | Feature | Status |
 |---|---------|--------|
-| 137 | pkg-config file | ✅ (`meson` pkgconfig.generate → `libnci.pc`) |
-| 138 | Versioned library | ✅ (project version 0.2.0; static lib today, soname when shared) |
-| 139 | Install targets | ✅ (headers + lib + pkg-config) |
-| 140 | Thread-safety doc | 🟡 (each `nci_dev` is single-threaded; documented in README) |
-| 141 | CMake find module | ⬜ |
+| 137 | pkg-config file | ✅ (`meson` pkgconfig.generate → `libnci.pc`; `requires_private` = libcrypto + libgpiod, `-pthread` private so a static link resolves the full closure) |
+| 138 | Versioned library | ✅ (`library()` + `default_library=both`: builds `libnci.so.0` (soversion 0 = unstable alpha ABI) + `.so.1.0.0` + `libnci.a`; project version 1.0.0-alpha.1) |
+| 139 | Install targets | ✅ (headers + shared/static lib + pkg-config + CMake config + man1 pages via `meson install`) |
+| 140 | Thread-safety doc | ✅ (full contract in README "Thread safety": each `nci` handle single-threaded; `nci_abort` cross-thread; async worker owns the handle; pure layers reentrant) |
+| 141 | CMake find module | ✅ (installable package config `libnciConfig.cmake` + version file → `find_package(libnci CONFIG)` exports the `libnci::nci` imported target; `cmake/*.cmake.in`) |
 
 ## 16. CLI tools
 | # | Tool | Status |
 |---|------|--------|
 | 142 | nfc-poll | ✅ (generic `nci_*`, `--chipset`/`--tech`/`--list`) |
 | 143 | nfc-read-ndef | ✅ (pre-existing) |
-| 144 | nfc-write-ndef | ⬜ (needs T4T write) |
+| 144 | nfc-write-ndef | ✅ (`apps/nfc-write-ndef.c`: `--uri`/`--text`/`--format`/`--read-only`, builds the record, writes via `nci_ndef_write`, reads back to verify) |
 | 145–150 | nfc-format / mfultralight / mfclassic / 15693 / scan-device / emulate | ⬜ |
 | 151–153 | desfire-info / -auth / -manage | ✅ (pre-existing) |
 | 154 | ntag424-sdm | ✅ (offline SUN verifier; verified end-to-end) |

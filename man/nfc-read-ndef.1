@@ -1,0 +1,36 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH NFC-READ-NDEF 1 "2026-06-27" "libnci 1.0.0-alpha.1" "libnci manual"
+.SH NAME
+nfc-read-ndef \- read and decode the NDEF message from a Type 4 tag
+.SH SYNOPSIS
+.B nfc-read-ndef
+.RI [ options ]
+.SH DESCRIPTION
+.B nfc-read-ndef
+waits for an NFC Forum Type 4 tag (NTAG 424 DNA, a DESFire with an NDEF
+application, ...), reads its NDEF message and prints a hex dump plus a decoded
+view of the first record. Text and URI records are rendered as readable
+strings.
+.SH OPTIONS
+.TP
+.BI --chip " PATH"
+GPIO chip device node; autodetected when omitted.
+.TP
+.BI --bus " PATH"
+I2C bus device node (default: /dev/i2c-1).
+.SH ENVIRONMENT
+.TP
+.B NCI_LOG
+Log verbosity 0\(en5; set to 4 for NCI frame tracing, 5 to add raw I2C bytes.
+.SH EXIT STATUS
+0 on a clean exit, non-zero if the device could not be opened.
+.SH EXAMPLES
+.nf
+nfc-read-ndef
+NCI_LOG=4 nfc-read-ndef
+.fi
+.SH SEE ALSO
+.BR nfc-write-ndef (1),
+.BR nfc-poll (1)
+.SH AUTHOR
+Part of the libnci NFC stack.
