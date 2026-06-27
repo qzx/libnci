@@ -127,6 +127,17 @@ target_link_libraries(myapp PRIVATE libnci::nci)
 (If you installed to a non-standard prefix, point `PKG_CONFIG_PATH` /
 `CMAKE_PREFIX_PATH` at it.)
 
+### ESP32 / Arduino
+
+There is an ESP32 port under [`esp32/`](esp32/README.md): the whole protocol
+stack is reused unchanged, with the three platform layers (I2C, GPIO, crypto)
+re-implemented on Arduino `Wire` + ESP32 mbedTLS. Build the importable library
+zip with `./esp32/build-arduino-zip.sh` (or download it from the release assets),
+then **Arduino IDE → Sketch → Include Library → Add .ZIP Library…** and open
+**File → Examples → libnci → nfc_detect**. It is **alpha and not yet
+hardware-verified on ESP32** — see [`esp32/README.md`](esp32/README.md) for
+wiring, caveats, and what to report.
+
 ## Run
 
 ```bash
