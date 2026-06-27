@@ -19,7 +19,7 @@ hcinfc_sources = [
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/desfire_lrp.c', 'src/desfire_dam.c',
-  'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c',
+  'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
 ]
 
 hcinfc_lib = static_library('hcinfc',
@@ -60,47 +60,47 @@ import('pkgconfig').generate(hcinfc_lib,
 
 # --- unit tests: pure layers, no libgpiod, no hardware --------------------
 test_nci = executable('test_nci',
-  ['tests/test_nci.c', 'src/nci.c'],
+  ['tests/test_nci.c', 'src/nci.c', 'src/log.c'],
   include_directories: inc_all)
 test('nci', test_nci)
 
 # card application layers (T4T NDEF / NDEF parse / DESFire) vs a mock apdu_fn
 test_cards = executable('test_cards',
   ['tests/test_cards.c', 'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c',
-   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/crypto.c'],
+   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('cards', test_cards)
 
 # crypto primitives vs RFC 4493 / FIPS-197 / SP800-38A known-answer vectors
 test_crypto = executable('test_crypto',
-  ['tests/test_crypto.c', 'src/crypto.c'],
+  ['tests/test_crypto.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('crypto', test_crypto)
 
 # LRP primitive vs the NXP AN12304 test vectors (docs/LRP.txt)
 test_lrp = executable('test_lrp',
-  ['tests/test_lrp.c', 'src/lrp.c', 'src/crypto.c'],
+  ['tests/test_lrp.c', 'src/lrp.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('lrp', test_lrp)
 
 # CRC + protocol utilities (CRC-A/B, ISO15693, FeliCa, ATS/ATQB parsing)
 test_crc = executable('test_crc',
-  ['tests/test_crc.c', 'src/crc.c'],
+  ['tests/test_crc.c', 'src/crc.c', 'src/log.c'],
   include_directories: inc_all)
 test('crc', test_crc)
 
 # NDEF parser completions + encoder/builder round-trips
 test_ndef = executable('test_ndef',
-  ['tests/test_ndef.c', 'src/ndef.c', 'src/ndef_build.c'],
+  ['tests/test_ndef.c', 'src/ndef.c', 'src/ndef_build.c', 'src/log.c'],
   include_directories: inc_all)
 test('ndef', test_ndef)
 
 # NTAG 424 DNA SDM / SUN verifier (AN12196 primitives)
 test_sdm = executable('test_sdm',
-  ['tests/test_sdm.c', 'src/sdm.c', 'src/crypto.c'],
+  ['tests/test_sdm.c', 'src/sdm.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('sdm', test_sdm)

@@ -36,6 +36,9 @@ typedef struct {
     int (*reset)(void *ctx, bool fw_download);
     /* Interrupt a blocked read() from another thread (may be NULL). */
     void (*abort)(void *ctx);
+    /* Status byte of the most recent NCI command response (impl.txt #128).
+     * The NCI layer records it on every RSP; 0x00 = STATUS_OK. */
+    uint8_t last_nci_status;
 } pn7160_transport;
 
 /* Build the concrete I2C + libgpiod transport from config. */

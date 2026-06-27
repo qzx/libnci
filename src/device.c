@@ -45,7 +45,6 @@ struct hci_dev {
     desfire_ev2_session ev2;      /* DESFire/NTAG 424 secure session, if any   */
     desfire_legacy_session legacy;/* DES/3DES legacy/ISO auth session, if any  */
     desfire_lrp_session lrp;      /* LRP-mode session, if any                  */
-    uint8_t             last_status;
     uint32_t            tech_mask;
     nci_disc_target     targets[MAX_TARGETS];
     size_t              n_targets;
@@ -99,6 +98,38 @@ const char *hci_strerror(int status)
     default:             return status > 0 ? "ok (length)" : "unknown error";
     }
 }
+
+/* Human string for a raw NCI status byte behind an HCI_E_STATUS (impl.txt #128).
+ * Covers the common NCI 2.0 generic/RF/NFCEE codes. */
+const char *hci_nci_status_str(uint8_t s)
+{
+    switch (s) {
+    case 0x00: return "STATUS_OK";
+    case 0x01: return "STATUS_REJECTED";
+    case 0x02: return "STATUS_RF_FRAME_CORRUPTED";
+    case 0x03: return "STATUS_FAILED";
+    case 0x04: return "STATUS_NOT_INITIALIZED";
+    case 0x05: return "STATUS_SYNTAX_ERROR";
+    case 0x06: return "STATUS_SEMANTIC_ERROR";
+    case 0x09: return "STATUS_INVALID_PARAM";
+    case 0x0A: return "STATUS_MESSAGE_SIZE_EXCEEDED";
+    case 0xA0: return "DISCOVERY_ALREADY_STARTED";
+    case 0xA1: return "DISCOVERY_TARGET_ACTIVATION_FAILED";
+    case 0xA2: return "DISCOVERY_TEAR_DOWN";
+    case 0xB0: return "RF_TRANSMISSION_ERROR";
+    case 0xB1: return "RF_PROTOCOL_ERROR";
+    case 0xB2: return "RF_TIMEOUT_ERROR";
+    case 0xC0: return "NFCEE_INTERFACE_ACTIVATION_FAILED";
+    case 0xC1: return "NFCEE_TRANSMISSION_ERROR";
+    case 0xC2: return "NFCEE_PROTOCOL_ERROR";
+    case 0xC3: return "NFCEE_TIMEOUT_ERROR";
+    default:   return "unknown NCI status";
+    }
+}
+
+/* ---- log verbosity (impl.txt #129) ------------------------------------ */
+void hci_set_log_level(hci_log_level level) { pn7160_log_set_level((int)level); }
+hci_log_level hci_get_log_level(void)       { return (hci_log_level)pn7160_log_level(); }
 
 const char *hci_protocol_name(hci_protocol proto)
 {
@@ -175,7 +206,7 @@ hci_dev *hci_open(const char *chipset, const hci_config *cfg)
                  cands[ci][0] ? cands[ci] : "(auto)");
             break;
         }
-        LOGD("open: %s did not answer CORE_RESET; trying next",
+        LOGW("open: %s did not answer CORE_RESET; trying next",
              cands[ci][0] ? cands[ci] : "(auto)");
         pn7160_transport_close(d->t);
         d->t = NULL;
@@ -216,7 +247,7 @@ const char *hci_fw_version(hci_dev *d)
     return (d && d->fw_str[0]) ? d->fw_str : "unknown";
 }
 
-uint8_t hci_last_status(hci_dev *d) { return d ? d->last_status : 0; }
+uint8_t hci_last_status(hci_dev *d) { return (d && d->t) ? d->t->last_nci_status : 0; }
 
 const char *hci_device_info(hci_dev *d)
 {

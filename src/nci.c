@@ -71,6 +71,9 @@ static int command(pn7160_transport *t,
             return PN7160_ERR;
         }
         if (mt(rsp) == MT_RSP && gid(rsp) == gid(cmd) && oid(rsp) == oid(cmd)) {
+            /* First payload byte is the NCI status for status-bearing RSPs
+             * (impl.txt #128); surface it to the device layer. */
+            t->last_nci_status = (n > HDR_LEN) ? rsp[HDR_LEN] : 0x00;
             if (rsp_len) *rsp_len = (size_t)n;
             return PN7160_OK;
         }

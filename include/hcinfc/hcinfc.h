@@ -53,6 +53,27 @@ typedef enum {
 /* Human-readable, never NULL, valid for the program lifetime. */
 const char *hci_strerror(int status);
 
+/* Human string for a raw NCI status byte (the value from hci_last_status()
+ * behind an HCI_E_STATUS result). Never NULL. (impl.txt #128) */
+const char *hci_nci_status_str(uint8_t nci_status);
+
+/* ---- diagnostics / verbosity (impl.txt #129) -------------------------- *
+ * Runtime-selectable log levels, no external dependency. Output goes to
+ * stderr. Also settable via the environment (resolved once, on first use):
+ *   NCI_LOG=<0..5>            explicit level
+ *   NCI_DEBUG / PN7160_DEBUG  legacy boolean -> NCI-frame level             */
+typedef enum {
+    HCI_LOG_SILENT = 0,   /* nothing                                        */
+    HCI_LOG_ERROR  = 1,   /* errors only (default)                          */
+    HCI_LOG_WARN   = 2,   /* + recoverable/abnormal events                  */
+    HCI_LOG_INFO   = 3,   /* + high-level operations                        */
+    HCI_LOG_NCI    = 4,   /* + NCI control frames (hex)                      */
+    HCI_LOG_BYTES  = 5,   /* + raw I2C/SPI byte traffic                      */
+} hci_log_level;
+
+void          hci_set_log_level(hci_log_level level);
+hci_log_level hci_get_log_level(void);
+
 /* ---- poll result sentinels (tri-state, kept for source compatibility) - */
 #define HCI_POLL_NONE   0   /* hci_poll: no tag within the timeout          */
 #define HCI_POLL_TAG    1   /* hci_poll: a tag was activated                */

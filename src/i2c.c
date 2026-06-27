@@ -67,7 +67,7 @@ int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len)
     int eremoteio = 0;
     for (;;) {
         ssize_t n = write(i->fd, buf, len);
-        if (n >= 0) return (int)n;
+        if (n >= 0) { pn7160_log_hex_at(PN7160_LOG_BYTES, "i2c>", buf, (size_t)n); return (int)n; }
         if (errno == EINTR || errno == EAGAIN) continue;
         /* The PN7160 transiently NAKs a write too (e.g. just after a state
          * change); retry briefly as on the read path before giving up. */
@@ -87,7 +87,7 @@ int pn7160_i2c_read(pn7160_i2c *i, uint8_t *buf, size_t len)
     int eremoteio = 0;
     for (;;) {
         ssize_t n = read(i->fd, buf, len);
-        if (n >= 0) return (int)n;
+        if (n >= 0) { pn7160_log_hex_at(PN7160_LOG_BYTES, "i2c<", buf, (size_t)n); return (int)n; }
         if (errno == EINTR || errno == EAGAIN) continue;
         if (errno == EREMOTEIO && eremoteio++ < I2C_READ_RETRIES) {
             struct timespec ts = { 0, I2C_RETRY_US * 1000L };

@@ -264,8 +264,8 @@ Still deferred: #100 (RF-timed proximity, needs NFCC support), #101 (DAM).
 |---|---------|--------|-------|
 | 126 | Structured error codes | ✅ | `hci_status` enum |
 | 127 | `hci_strerror()` | ✅ | `device.c` |
-| 128 | NCI status passthrough | 🟡 | `hci_last_status` (plumbing in; richer capture todo) |
-| 129 | Verbose trace / logging | 🟡 | env `PN7160_DEBUG`; multi-level verbosity todo |
+| 128 | NCI status passthrough | ✅ hw | the NCI layer records every RSP's status byte into `transport.last_nci_status`; `hci_last_status()` returns it, `hci_nci_status_str()` names the common codes. Validated: `0x00 STATUS_OK` after a successful poll. |
+| 129 | Verbose trace / logging | ✅ hw | 6 levels (SILENT/ERROR/WARN/INFO/NCI/BYTES) via `hci_set_log_level()`/`hci_get_log_level()` or `NCI_LOG=0..5` (legacy `PN7160_DEBUG`→NCI). No external dep. Validated live: L1 silent, L4 = NCI frames, L5 adds raw I2C bytes. |
 | 130 | `hci_device_info()` | ✅ | chipset + NCI version + fw |
 
 ## 14. CRC & protocol utilities
