@@ -227,6 +227,19 @@ int pn7160_desfire_get_iso_file_ids(pn7160 *p, uint16_t *ids, size_t cap,
 int pn7160_desfire_get_key_settings(pn7160 *p, uint8_t *settings, uint8_t *max_keys);
 int pn7160_desfire_change_key_settings(pn7160 *p, uint8_t new_settings);
 
+/* ---- EV3: Transaction MAC (impl.txt #97-99) -------------------------- *
+ * Create a TransactionMAC file (#98) so the app MACs every committed
+ * transaction; optionally CommitReaderID (#97) to bind a reader identity; read
+ * the file (#99) for the TMAC counter (TMC) and last MAC (TMV). All require a
+ * secure session in the file's application. */
+int pn7160_desfire_create_transaction_mac_file(pn7160 *p, uint8_t file_no,
+        uint8_t comm, uint16_t access_rights, const uint8_t tmac_key[16],
+        uint8_t key_version);
+int pn7160_desfire_commit_reader_id(pn7160 *p, const uint8_t reader_id[16],
+                                    uint8_t *enc_tmri, size_t cap, size_t *out_len);
+int pn7160_desfire_read_transaction_mac(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                        uint32_t *tmac_counter, uint8_t tmv[8]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1098,3 +1098,28 @@ int pn7160_desfire_change_key_settings(pn7160 *p, uint8_t new_settings)
     EV2_GUARD(p);
     return desfire_ev3_change_key_settings(facade_apdu, p, &p->ev2, new_settings);
 }
+
+int pn7160_desfire_create_transaction_mac_file(pn7160 *p, uint8_t file_no,
+        uint8_t comm, uint16_t access_rights, const uint8_t tmac_key[16],
+        uint8_t key_version)
+{
+    EV2_GUARD(p);
+    return desfire_ev3_create_transaction_mac_file(facade_apdu, p, &p->ev2, file_no,
+            comm, access_rights, tmac_key, key_version);
+}
+
+int pn7160_desfire_commit_reader_id(pn7160 *p, const uint8_t reader_id[16],
+                                    uint8_t *enc_tmri, size_t cap, size_t *out_len)
+{
+    EV2_GUARD(p);
+    return desfire_ev3_commit_reader_id(facade_apdu, p, &p->ev2, reader_id,
+                                        enc_tmri, cap, out_len);
+}
+
+int pn7160_desfire_read_transaction_mac(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                        uint32_t *tmac_counter, uint8_t tmv[8])
+{
+    EV2_GUARD(p);
+    return desfire_ev3_read_transaction_mac(facade_apdu, p, &p->ev2, comm, file_no,
+                                            tmac_counter, tmv);
+}

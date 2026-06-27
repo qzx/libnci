@@ -201,26 +201,32 @@ byte-for-byte intact.
 ## 9. DESFire EV3
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
-| 75 | EV2First + secure messaging | ✅ (pre-existing) | `desfire_ev2_*` |
-| 76 | AuthenticateEV2NonFirst | ⬜ | |
-| 77 | AuthenticateLegacy (3DES) | ⬜ | |
-| 78 | AuthenticateISO (3DES) | ⬜ | |
-| 79 | Large data chaining | 🟡 | EV2 read/write already frame-split; native AF chaining todo |
+| 75 | EV2First + secure messaging | ✅hw | `desfire_ev2_*` |
+| 76 | AuthenticateEV2NonFirst | ✅hw | `pn7160_desfire_authenticate_nonfirst`; live: re-auth mid-session, UID matches |
+| 77 | AuthenticateLegacy (3DES) | ⬜ | needs DES/2K3DES crypto + the legacy CBC-send handshake; deferred |
+| 78 | AuthenticateISO (3DES) | ⬜ | as #77 (0x1A ISO variant); deferred |
+| 79 | Large data chaining | 🟡 | offset-chunked read/write works for StandardData; native `0xAF` response continuation (record files / single large reads) still todo - `desfire_ev2_transact` treats AF as terminal |
 | 80–84 | Value files (create/get/credit/debit/limited) | ✅hw | validated on a real EV3: arithmetic 100→150→120→125 exact |
 | 85–89 | Record files (create/read/write/clear) | ✅hw | linear + cyclic create/write/read/clear validated |
 | 90 | CreateBackupDataFile | ✅hw | create/write/commit/read validated |
 | 91–92 | Commit / Abort transaction | ✅hw | abort rollback verified (AA preserved over uncommitted BB) |
 | 93 | GetISOFileIDs | 🟡 | command framing correct; this EV3 rejects ISO File IDs on files (LENGTH_ERROR), so there is nothing to enumerate here |
 | 94–95 | Get/Change KeySettings | ✅hw | validated on a real EV3 |
-| 96 | GetApplicationIDs (ISO) | ⬜ | |
-| 97–99 | CommitReaderID / TMAC file | ⬜ | EV3 transaction-MAC differentiator, next up |
-| 100 | Proximity Check | ⬜ | |
-| 101 | Delegated App Mgmt | ⬜ | |
-| 102 | SetConfiguration ext | ⬜ | |
-| 103 | LRP mode | ⬜ | |
+| 96 | GetApplicationIDs | ✅hw | `desfire_ev2_get_application_ids` (0x6A); live: enumerated app `000001` |
+| 97 | CommitReaderID | ✅hw | `pn7160_desfire_commit_reader_id` (0xC8, MAC mode); live: bound reader id, EncTMRI returned |
+| 98 | CreateTransactionMACFile | ✅hw | `pn7160_desfire_create_transaction_mac_file` (0xCE, Full; key enciphered) |
+| 99 | Read TransactionMAC file | ✅hw | `pn7160_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
+| 100 | Proximity Check | ⬜ | needs NFCC RF-timing support (timed PC frames); not exposed by the PN7160 data path at this layer; deferred |
+| 101 | Delegated App Mgmt | ⬜ | issuer-delegated provisioning with encrypted DAM key; deferred (complex, needs issuer DAM keys to validate) |
+| 102 | SetConfiguration ext | 🟢 | `pn7160_desfire_set_configuration` (0x5C, Full) - same command as NTAG #70; not executed live (one-way options) |
+| 103 | LRP mode | ⬜ | deferred - LRP primitive is in AN12304 (not in-repo) and the mode switch is irreversible; same as NTAG #74 |
 
-The EV3 commands reuse the already-tested `desfire_ev2_transact` for MAC/full
-comm; only the command-data byte layouts are new (and unit-tested in test_cards).
+The TMAC suite (#97-99) is the EV3 differentiator and is validated live: a
+TransactionMAC file makes the card emit a MAC over every committed transaction;
+CommitReaderID binds a reader identity. The EV3 commands reuse the already-tested
+`desfire_ev2_transact` for MAC/full comm; only the command-data byte layouts are
+new. Deferred this round: #77/#78 (legacy 3DES auth - needs DES crypto),
+#100 (RF-timed proximity), #101 (DAM), #103 (LRP).
 
 ## 10. NFC-DEP / P2P  · 11. HCE
 | # | Feature | Status |
