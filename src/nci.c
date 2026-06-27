@@ -183,10 +183,11 @@ int nci_rf_discover_map(pn7160_transport *t)
      * Even unmapped protocols still activate on the Frame interface, which
      * is all we need to read a UID. */
     static const uint8_t cmd[] = {
-        0x21, 0x00, 0x0A, 0x03,
-        0x02, 0x01, 0x01,   /* T2T,    poll, Frame   */
-        0x04, 0x01, 0x02,   /* ISODEP, poll, ISO-DEP */
-        0x05, 0x01, 0x03,   /* NFCDEP, poll, NFC-DEP */
+        0x21, 0x00, 0x0D, 0x04,
+        0x02, 0x01, 0x01,   /* T2T,    poll, Frame                 */
+        0x04, 0x01, 0x02,   /* ISODEP, poll, ISO-DEP               */
+        0x05, 0x01, 0x03,   /* NFCDEP, poll, NFC-DEP               */
+        0x80, 0x01, 0x80,   /* MIFARE, poll, MIFARE Classic iface  */
     };
     uint8_t rsp[MAX_PKT];
     if (command(t, cmd, sizeof cmd, rsp, sizeof rsp, NULL) != PN7160_OK)
@@ -221,11 +222,42 @@ int nci_rf_discover(pn7160_transport *t)
     return PN7160_OK;
 }
 
+/* ---- RF_DISCOVER (selective by technology) ----------------------- *
+ * Build an RF_DISCOVER_CMD from a HCI_TECH_* bitmask, polling only the chosen
+ * technologies. tech_mask 0 falls back to all four. (impl.txt #1) */
+int nci_rf_discover_mask(pn7160_transport *t, uint32_t tech_mask)
+{
+    if (tech_mask == 0) tech_mask = HCI_TECH_A | HCI_TECH_B | HCI_TECH_F | HCI_TECH_V;
+
+    uint8_t body[8];
+    uint8_t n = 0;
+    if (tech_mask & HCI_TECH_A) { body[n++] = TECH_A_POLL; body[n++] = 0x01; }
+    if (tech_mask & HCI_TECH_B) { body[n++] = TECH_B_POLL; body[n++] = 0x01; }
+    if (tech_mask & HCI_TECH_F) { body[n++] = TECH_F_POLL; body[n++] = 0x01; }
+    if (tech_mask & HCI_TECH_V) { body[n++] = TECH_V_POLL; body[n++] = 0x01; }
+
+    uint8_t cmd[4 + 8];
+    cmd[0] = 0x21; cmd[1] = OID_RF_DISCOVER; cmd[2] = (uint8_t)(1 + n);
+    cmd[3] = (uint8_t)(n / 2);   /* number of (tech,freq) config entries */
+    memcpy(cmd + 4, body, n);
+
+    uint8_t rsp[MAX_PKT];
+    if (command(t, cmd, 4 + n, rsp, sizeof rsp, NULL) != PN7160_OK)
+        return PN7160_ERR;
+    if (rsp[3] != NCI_STATUS_OK) {
+        LOGE("nci: RF_DISCOVER(mask 0x%02x) status 0x%02x", tech_mask, rsp[3]);
+        return PN7160_ERR;
+    }
+    LOGD("nci: RF_DISCOVER(mask 0x%02x, %u techs) ok", tech_mask, n / 2);
+    return PN7160_OK;
+}
+
 /* ---- RF_DEACTIVATE ----------------------------------------------- *
- * type 0x00 = Idle (stop), 0x03 = Discovery (drop the tag, keep polling).
+ * type 0x00 = Idle (stop), 0x01 = Sleep, 0x02 = Sleep_AF,
+ * 0x03 = Discovery (drop the tag, keep polling).
  * After the RSP the NFCC emits an RF_DEACTIVATE_NTF once the field state has
  * actually changed; we drain it so the next read sees a clean stream. */
-static int rf_deactivate(pn7160_transport *t, uint8_t type)
+int nci_rf_deactivate(pn7160_transport *t, uint8_t type)
 {
     const uint8_t cmd[] = { 0x21, OID_RF_DEACTIVATE, 0x01, type };
     uint8_t rsp[MAX_PKT];
@@ -237,10 +269,83 @@ static int rf_deactivate(pn7160_transport *t, uint8_t type)
     return PN7160_OK;
 }
 
-int nci_rf_deactivate_idle(pn7160_transport *t)      { return rf_deactivate(t, 0x00); }
-int nci_rf_deactivate_discovery(pn7160_transport *t) { return rf_deactivate(t, 0x03); }
+int nci_rf_deactivate_idle(pn7160_transport *t)      { return nci_rf_deactivate(t, 0x00); }
+int nci_rf_deactivate_discovery(pn7160_transport *t) { return nci_rf_deactivate(t, 0x03); }
+
+/* ---- RF_DISCOVER_SELECT (pick one of several targets) ------------- */
+uint8_t nci_iface_for_protocol(uint8_t rf_protocol)
+{
+    switch (rf_protocol) {
+    case 0x04: return 0x02;   /* ISO-DEP -> ISO-DEP interface  */
+    case 0x05: return 0x03;   /* NFC-DEP -> NFC-DEP interface  */
+    default:   return 0x01;   /* everything else -> Frame      */
+    }
+}
+
+int nci_rf_discover_select(pn7160_transport *t, uint8_t rf_disc_id,
+                           uint8_t rf_protocol, uint8_t rf_interface)
+{
+    const uint8_t cmd[] = { 0x21, 0x04, 0x03, rf_disc_id, rf_protocol, rf_interface };
+    uint8_t rsp[MAX_PKT];
+    if (command(t, cmd, sizeof cmd, rsp, sizeof rsp, NULL) != PN7160_OK)
+        return PN7160_ERR;
+    if (rsp[3] != NCI_STATUS_OK) {
+        LOGE("nci: RF_DISCOVER_SELECT(id %u) status 0x%02x", rf_disc_id, rsp[3]);
+        return PN7160_ERR;
+    }
+    LOGD("nci: RF_DISCOVER_SELECT(id %u proto 0x%02x) ok", rf_disc_id, rf_protocol);
+    return PN7160_OK;
+}
 
 /* ---- activation parsing ----------------------------------------- */
+
+/* Extract UID/SAK/ATQA from the technology-specific parameters that follow
+ * either an RF_INTF_ACTIVATED_NTF or an RF_DISCOVER_NTF (same layout). `sak`
+ * and `atqa` may be NULL. */
+static void parse_tech_uid(uint8_t tech_mode, const uint8_t *tp, uint8_t n_params,
+                           uint8_t *uid, uint8_t *uid_len, uint8_t *sak,
+                           uint16_t *atqa)
+{
+    *uid_len = 0;
+    if (sak)  *sak  = 0;
+    if (atqa) *atqa = 0;
+
+    switch (tech_mode) {
+    case TECH_A_POLL:
+        /* NFC-A: SENS_RES(2), NFCID1_len(1), NFCID1(n), SEL_RES_len(1), SAK(1). */
+        if (n_params >= 2 && atqa) *atqa = (uint16_t)(tp[0] | (tp[1] << 8));
+        if (n_params >= 3) {
+            uint8_t idlen = tp[2];
+            if (idlen > PN7160_MAX_UID_LEN) idlen = PN7160_MAX_UID_LEN;
+            if (3 + (size_t)idlen <= n_params) {
+                memcpy(uid, &tp[3], idlen);
+                *uid_len = idlen;
+            }
+            size_t sak_idx = 3 + (size_t)tp[2] + 1;   /* after NFCID1 + len byte */
+            if (sak && sak_idx < n_params) *sak = tp[sak_idx];
+        }
+        break;
+    case TECH_B_POLL:
+        /* NFC-B SENSB_RES: byte0 = 0x50, NFCID0 at bytes 1..4. */
+        if (n_params >= 5) { memcpy(uid, &tp[1], 4); *uid_len = 4; }
+        break;
+    case TECH_F_POLL:
+        /* NFC-F SENSF_RES: len, 0x01, NFCID2 at bytes 2..9. */
+        if (n_params >= 10) { memcpy(uid, &tp[2], 8); *uid_len = 8; }
+        break;
+    case TECH_V_POLL:
+        /* NFC-V: flags(1), DSFID(1), UID(8, LSB first). */
+        if (n_params >= 10) { memcpy(uid, &tp[2], 8); *uid_len = 8; }
+        break;
+    default: {
+        uint8_t cpy = n_params > PN7160_MAX_UID_LEN ? PN7160_MAX_UID_LEN : n_params;
+        memcpy(uid, tp, cpy);
+        *uid_len = cpy;
+        break;
+    }
+    }
+}
+
 int nci_parse_activation(const uint8_t *pkt, size_t len, pn7160_tag *tag)
 {
     if (len < HDR_LEN || !tag) return PN7160_ERR;
@@ -261,48 +366,8 @@ int nci_parse_activation(const uint8_t *pkt, size_t len, pn7160_tag *tag)
     const uint8_t *tp = p + 7;
     if (7 + (size_t)n_params > plen) n_params = (uint8_t)(plen - 7);
 
-    switch (tag->tech_mode) {
-    case TECH_A_POLL:
-        /* NFC-A tech params: SENS_RES(2), NFCID1_len(1), NFCID1(n), ... */
-        if (n_params >= 3) {
-            uint8_t idlen = tp[2];
-            if (idlen > PN7160_MAX_UID_LEN) idlen = PN7160_MAX_UID_LEN;
-            if (3 + (size_t)idlen <= n_params) {
-                memcpy(tag->uid, &tp[3], idlen);
-                tag->uid_len = idlen;
-            }
-        }
-        break;
-    case TECH_B_POLL:
-        /* NFC-B SENSB_RES: byte0 = 0x50, NFCID0 at bytes 1..4. */
-        if (n_params >= 5) {
-            memcpy(tag->uid, &tp[1], 4);
-            tag->uid_len = 4;
-        }
-        break;
-    case TECH_F_POLL:
-        /* NFC-F SENSF_RES: byte0 len, byte1 0x01, NFCID2 at bytes 2..9. */
-        if (n_params >= 10) {
-            memcpy(tag->uid, &tp[2], 8);
-            tag->uid_len = 8;
-        }
-        break;
-    case TECH_V_POLL:
-        /* NFC-V: flags(1), DSFID(1), UID(8, LSB first). */
-        if (n_params >= 10) {
-            memcpy(tag->uid, &tp[2], 8);
-            tag->uid_len = 8;
-        }
-        break;
-    default:
-        /* Unknown tech: copy raw tech params so the caller still sees data. */
-        {
-            uint8_t cpy = n_params > PN7160_MAX_UID_LEN ? PN7160_MAX_UID_LEN : n_params;
-            memcpy(tag->uid, tp, cpy);
-            tag->uid_len = cpy;
-        }
-        break;
-    }
+    parse_tech_uid(tag->tech_mode, tp, n_params,
+                   tag->uid, &tag->uid_len, &tag->sak, &tag->atqa);
     return PN7160_OK;
 }
 
@@ -346,8 +411,11 @@ int nci_wait_activation(pn7160_transport *t, pn7160_tag *tag,
             const uint8_t *p = pkt + HDR_LEN;
             size_t plen = pkt[2];
             memset(conn, 0, sizeof *conn);
+            conn->disc_id      = p[0];
             conn->rf_interface = p[1];
             conn->rf_protocol  = p[2];
+            conn->tech_mode    = p[3];
+            conn->sak          = tag->sak;
             conn->max_payload  = p[4];
             conn->credits      = p[5];
             conn->activated    = true;
@@ -369,6 +437,87 @@ int nci_wait_activation(pn7160_transport *t, pn7160_tag *tag,
     return PN7160_TIMEOUT;
 }
 
+/* Parse one RF_DISCOVER_NTF into a discovered target. The trailing byte of
+ * the payload is the Notification Type: 1 = more notifications follow,
+ * 0/2 = this is the last. Sets *more accordingly. */
+static int parse_discover_ntf(const uint8_t *pkt, size_t n,
+                              nci_disc_target *tg, uint8_t *more)
+{
+    if (n < HDR_LEN + 4) return PN7160_ERR;
+    const uint8_t *p = pkt + HDR_LEN;
+    size_t plen = pkt[2];
+    if (plen < 4) return PN7160_ERR;
+    tg->rf_disc_id  = p[0];
+    tg->rf_protocol = p[1];
+    tg->tech_mode   = p[2];
+    uint8_t tlen = p[3];
+    if (4 + (size_t)tlen > plen) tlen = (uint8_t)(plen - 4);
+    parse_tech_uid(tg->tech_mode, &p[4], tlen,
+                   tg->uid, &tg->uid_len, &tg->sak, NULL);
+    /* Notification Type: 0x00/0x01 = last, 0x02 = more notifications follow. */
+    size_t nt_idx = 4 + (size_t)p[3];
+    *more = (nt_idx < plen) ? (p[nt_idx] == 0x02 ? 1 : 0) : 0;
+    return PN7160_OK;
+}
+
+int nci_poll_ex(pn7160_transport *t, pn7160_tag *tag, nci_rf_conn *conn,
+                nci_disc_target *targets, size_t cap, size_t *n_targets,
+                int timeout_ms)
+{
+    if (n_targets) *n_targets = 0;
+
+    uint8_t pkt[MAX_PKT];
+    int n = t->read(t->ctx, pkt, sizeof pkt, timeout_ms);
+    if (n == 0) return PN7160_TIMEOUT;
+    if (n < HDR_LEN) return PN7160_ERR;
+
+    /* Single target: the NFCC auto-activated it. Reuse the activation parse. */
+    if (mt(pkt) == MT_NTF && gid(pkt) == GID_RF && oid(pkt) == OID_RF_INTF_ACTIVATED) {
+        if (nci_parse_activation(pkt, (size_t)n, tag) != PN7160_OK)
+            return PN7160_ERR;
+        if (conn) {
+            const uint8_t *p = pkt + HDR_LEN;
+            size_t plen = pkt[2];
+            memset(conn, 0, sizeof *conn);
+            conn->disc_id      = p[0];
+            conn->rf_interface = p[1];
+            conn->rf_protocol  = p[2];
+            conn->tech_mode    = p[3];
+            conn->sak          = tag->sak;
+            conn->max_payload  = p[4];
+            conn->credits      = p[5];
+            conn->activated    = true;
+            conn->frame_size   = parse_iso_dep_fsc(p, plen);
+        }
+        return PN7160_TAG_FOUND;
+    }
+
+    /* Several targets: collect the RF_DISCOVER_NTF list until the last one. */
+    if (mt(pkt) == MT_NTF && gid(pkt) == GID_RF && oid(pkt) == OID_RF_DISCOVER_NTF) {
+        size_t cnt = 0;
+        uint8_t more = 1;
+        for (int guard = 0; guard < 32; guard++) {
+            nci_disc_target tg;
+            if (parse_discover_ntf(pkt, (size_t)n, &tg, &more) == PN7160_OK) {
+                if (targets && cnt < cap) targets[cnt] = tg;
+                cnt++;
+            }
+            if (!more) break;
+            n = t->read(t->ctx, pkt, sizeof pkt, timeout_ms);
+            if (n < HDR_LEN) break;
+            if (!(mt(pkt) == MT_NTF && gid(pkt) == GID_RF &&
+                  oid(pkt) == OID_RF_DISCOVER_NTF))
+                break;
+        }
+        if (n_targets) *n_targets = (cnt > cap) ? cap : cnt;
+        LOGD("nci: %zu targets in field (select required)", cnt);
+        return NCI_POLL_MULTI;
+    }
+
+    LOGD("nci: ignoring ntf %02x%02x while polling", pkt[0], pkt[1]);
+    return PN7160_TIMEOUT;
+}
+
 /* ---- ISO-DEP data exchange (transceive) -------------------------- */
 
 /* CORE_CONN_CREDITS_NTF payload: num_entries, then [conn_id, credits] pairs.
@@ -386,20 +535,19 @@ static void absorb_credits(nci_rf_conn *conn, const uint8_t *pkt, int n)
     LOGD("nci: +credits -> %d", conn->credits);
 }
 
-int nci_transceive(pn7160_transport *t, nci_rf_conn *conn,
-                   const uint8_t *tx, size_t tx_len,
-                   uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
+/* Generic NCI data exchange on the static RF connection (Conn 0). No RF
+ * interface check, so it serves ISO-DEP, the Frame interface, and the MIFARE
+ * Classic proprietary command path (40/10 headers) alike. Returns 1 with
+ * *rx_len set, 0 on timeout, <0 on error. */
+int nci_data_xchg(pn7160_transport *t, nci_rf_conn *conn,
+                  const uint8_t *tx, size_t tx_len,
+                  uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
 {
     if (!conn || !conn->activated) {
-        LOGE("nci: transceive with no active tag");
+        LOGE("nci: data exchange with no active tag");
         return PN7160_ERR;
     }
-    if (conn->rf_interface != 0x02 /* ISO-DEP */) {
-        LOGE("nci: transceive needs ISO-DEP interface (have 0x%02x)",
-             conn->rf_interface);
-        return PN7160_ERR;
-    }
-    /* Single-packet TX: every command we issue (NDEF/DESFire) fits one packet.
+    /* Single-packet TX: every command we issue fits one packet.
      * (TX chaining via PBF would go here if we ever send >max_payload bytes.) */
     uint8_t maxpl = conn->max_payload ? conn->max_payload : 255;
     if (tx_len == 0 || tx_len > maxpl || tx_len > 255) {
@@ -461,4 +609,20 @@ int nci_transceive(pn7160_transport *t, nci_rf_conn *conn,
     }
     LOGE("nci: too many fragments");
     return PN7160_ERR;
+}
+
+int nci_transceive(pn7160_transport *t, nci_rf_conn *conn,
+                   const uint8_t *tx, size_t tx_len,
+                   uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
+{
+    if (!conn || !conn->activated) {
+        LOGE("nci: transceive with no active tag");
+        return PN7160_ERR;
+    }
+    if (conn->rf_interface != 0x02 /* ISO-DEP */) {
+        LOGE("nci: transceive needs ISO-DEP interface (have 0x%02x)",
+             conn->rf_interface);
+        return PN7160_ERR;
+    }
+    return nci_data_xchg(t, conn, tx, tx_len, rx, rx_cap, rx_len, timeout_ms);
 }

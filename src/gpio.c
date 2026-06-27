@@ -10,6 +10,7 @@
  * did `while (gpiod_line_get_value(IRQ) != 1) {}` which pins a CPU core. Here
  * we park in the kernel with gpiod_line_request_wait_edge_events().
  */
+#define _GNU_SOURCE
 #include "gpio.h"
 #include "log.h"
 
@@ -17,12 +18,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <poll.h>
+#include <unistd.h>
+#include <sys/eventfd.h>
 
 struct pn7160_gpio {
     struct gpiod_chip         *chip;
     struct gpiod_line_request *out_req;  /* VEN + DWL (outputs) */
     struct gpiod_line_request *irq_req;  /* IRQ (rising-edge input) */
     unsigned int ven, dwl, irq;
+    int          abort_efd;              /* eventfd to interrupt wait_irq */
     char path[64];
 };
 
@@ -57,23 +62,39 @@ static bool read_chip_label(const char *path, char *out, size_t out_sz)
     return ok;
 }
 
-static bool autodetect_chip(char *out, size_t out_sz)
+/* Collect candidate header controllers in preference order: every
+ * "pinctrl-rp1" chip first (Pi 5 can expose more than one with that label, and
+ * only the one wired to the 40-pin header answers - the caller probes each),
+ * then any other SoC header controller. */
+int pn7160_gpio_header_chips(char (*paths)[64], int max)
 {
-    char best_rp1[64] = {0};
-    char best_any[64] = {0};
-    for (int i = 0; i < 32; i++) {
+    int n = 0;
+    /* rp1 pass scans high->low: when a Pi 5 exposes two "pinctrl-rp1" chips,
+     * the 40-pin header is the higher-numbered one (e.g. gpiochip4 vs the
+     * duplicate gpiochip0), so try it first. The probe still falls back. */
+    for (int i = 31; i >= 0 && n < max; i--) {
         char path[64], label[64];
         snprintf(path, sizeof path, "/dev/gpiochip%d", i);
-        if (!read_chip_label(path, label, sizeof label))
-            continue;
-        if (strstr(label, "pinctrl-rp1") && !best_rp1[0])
-            snprintf(best_rp1, sizeof best_rp1, "%s", path);
-        else if (chip_label_is_header(label) && !best_any[0])
-            snprintf(best_any, sizeof best_any, "%s", path);
+        if (read_chip_label(path, label, sizeof label) &&
+            strstr(label, "pinctrl-rp1"))
+            snprintf(paths[n++], 64, "%s", path);
     }
-    const char *pick = best_rp1[0] ? best_rp1 : (best_any[0] ? best_any : NULL);
-    if (!pick) return false;
-    snprintf(out, out_sz, "%s", pick);
+    for (int i = 0; i < 32 && n < max; i++) {
+        char path[64], label[64];
+        snprintf(path, sizeof path, "/dev/gpiochip%d", i);
+        if (read_chip_label(path, label, sizeof label) &&
+            !strstr(label, "pinctrl-rp1") && chip_label_is_header(label))
+            snprintf(paths[n++], 64, "%s", path);
+    }
+    return n;
+}
+
+static bool autodetect_chip(char *out, size_t out_sz)
+{
+    char cands[8][64];
+    int n = pn7160_gpio_header_chips(cands, 8);
+    if (n == 0) return false;
+    snprintf(out, out_sz, "%s", cands[0]);
     return true;
 }
 
@@ -165,6 +186,12 @@ pn7160_gpio *pn7160_gpio_open(const pn7160_gpio_config *cfg)
         LOGE("gpio: request IRQ(%u) input+edge failed (line busy?)", g->irq);
         goto fail;
     }
+    /* eventfd to interrupt a blocked wait_irq from another thread (abort). */
+    g->abort_efd = eventfd(0, EFD_NONBLOCK);
+    if (g->abort_efd < 0) {
+        LOGE("gpio: eventfd() failed");
+        goto fail;
+    }
     LOGD("gpio: %s VEN=%u IRQ=%u DWL=%u", g->path, g->ven, g->irq, g->dwl);
     return g;
 fail:
@@ -175,10 +202,21 @@ fail:
 void pn7160_gpio_close(pn7160_gpio *g)
 {
     if (!g) return;
+    if (g->abort_efd > 0) close(g->abort_efd);
     if (g->irq_req) gpiod_line_request_release(g->irq_req);
     if (g->out_req) gpiod_line_request_release(g->out_req);
     if (g->chip)    gpiod_chip_close(g->chip);
     free(g);
+}
+
+/* Wake a blocked wait_irq (from another thread). One-shot: the next wait_irq
+ * returns PN7160_GPIO_ABORTED and drains the signal. */
+void pn7160_gpio_abort(pn7160_gpio *g)
+{
+    if (!g || g->abort_efd < 0) return;
+    uint64_t one = 1;
+    ssize_t w = write(g->abort_efd, &one, sizeof one);
+    (void)w;
 }
 
 static void set_line(struct gpiod_line_request *req, unsigned int off, bool high)
@@ -202,23 +240,49 @@ int pn7160_gpio_wait_irq(pn7160_gpio *g, int timeout_ms)
 {
     if (!g || !g->irq_req) return -1;
 
+    /* A pending abort takes priority even if a packet is also ready. */
+    if (g->abort_efd >= 0) {
+        uint64_t v;
+        if (read(g->abort_efd, &v, sizeof v) == (ssize_t)sizeof v)
+            return PN7160_GPIO_ABORTED;
+    }
+
     /* The chip holds IRQ high while a packet is pending. If we already
      * missed the edge (line is high now) report ready immediately so we
      * never deadlock waiting for an edge that has already passed. */
     if (gpiod_line_request_get_value(g->irq_req, g->irq) == GPIOD_LINE_VALUE_ACTIVE)
         return 1;
 
-    int64_t timeout_ns = (timeout_ms < 0) ? -1 : (int64_t)timeout_ms * 1000000;
-    int r = gpiod_line_request_wait_edge_events(g->irq_req, timeout_ns);
-    if (r <= 0) return r;   /* 0 timeout, <0 error */
+    /* Wait on BOTH the IRQ line fd and the abort eventfd so an abort can
+     * interrupt even an indefinite (timeout_ms < 0) wait. */
+    struct pollfd fds[2];
+    fds[0].fd = gpiod_line_request_get_fd(g->irq_req);
+    fds[0].events = POLLIN;
+    fds[1].fd = g->abort_efd;
+    fds[1].events = POLLIN;
+    int nfds = (g->abort_efd >= 0) ? 2 : 1;
 
-    /* Drain the edge events so the next wait blocks correctly. */
-    struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(8);
-    if (buf) {
-        gpiod_line_request_read_edge_events(g->irq_req, buf, 8);
-        gpiod_edge_event_buffer_free(buf);
+    int pr = poll(fds, (nfds_t)nfds, timeout_ms);
+    if (pr == 0) return 0;          /* timeout */
+    if (pr < 0)  return -1;         /* error */
+
+    if (nfds == 2 && (fds[1].revents & POLLIN)) {
+        uint64_t v;
+        ssize_t rd = read(g->abort_efd, &v, sizeof v);
+        (void)rd;
+        return PN7160_GPIO_ABORTED;
     }
-    return 1;
+
+    if (fds[0].revents & POLLIN) {
+        /* Drain the edge events so the next wait blocks correctly. */
+        struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(8);
+        if (buf) {
+            gpiod_line_request_read_edge_events(g->irq_req, buf, 8);
+            gpiod_edge_event_buffer_free(buf);
+        }
+        return 1;
+    }
+    return 0;
 }
 
 int pn7160_gpio_read_irq(pn7160_gpio *g)

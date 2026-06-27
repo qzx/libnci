@@ -20,16 +20,22 @@
 extern "C" {
 #endif
 
+/* read() returns this when interrupted by abort() from another thread. */
+#define PN7160_TRANSPORT_ABORTED (-2)
+
 typedef struct {
     void *ctx;
     /* Write a complete NCI packet. Returns bytes written or <0. */
     int (*write)(void *ctx, const uint8_t *buf, size_t len);
     /* Read exactly one complete NCI packet (3-byte header + payload),
      * blocking on IRQ up to timeout_ms (<0 = forever).
-     * Returns total bytes, 0 on timeout, <0 on error. */
+     * Returns total bytes, 0 on timeout, PN7160_TRANSPORT_ABORTED on abort,
+     * <0 on error. */
     int (*read)(void *ctx, uint8_t *buf, size_t cap, int timeout_ms);
     /* Drive the VEN/DWL reset choreography. fw_download selects boot mode. */
     int (*reset)(void *ctx, bool fw_download);
+    /* Interrupt a blocked read() from another thread (may be NULL). */
+    void (*abort)(void *ctx);
 } pn7160_transport;
 
 /* Build the concrete I2C + libgpiod transport from config. */

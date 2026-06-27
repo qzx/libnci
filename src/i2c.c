@@ -5,6 +5,7 @@
  * meaningless select() on a char-dev fd: readiness is signalled by the
  * IRQ GPIO, handled in the transport layer.
  */
+#define _POSIX_C_SOURCE 200809L   /* nanosleep */
 #include "i2c.h"
 #include "log.h"
 
@@ -12,9 +13,17 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
+
+/* The PN7160 occasionally NAKs an I2C read (EREMOTEIO) when the host reads a
+ * hair before the data is latched, even with IRQ asserted. NXP's own HAL
+ * retries this; a few short retries smooth it over without masking a removed
+ * chip (after the budget we still surface the error). */
+#define I2C_READ_RETRIES 8
+#define I2C_RETRY_US     200
 
 struct pn7160_i2c {
     int      fd;
@@ -55,10 +64,18 @@ void pn7160_i2c_close(pn7160_i2c *i)
 int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len)
 {
     if (!i || i->fd < 0) return -1;
+    int eremoteio = 0;
     for (;;) {
         ssize_t n = write(i->fd, buf, len);
         if (n >= 0) return (int)n;
         if (errno == EINTR || errno == EAGAIN) continue;
+        /* The PN7160 transiently NAKs a write too (e.g. just after a state
+         * change); retry briefly as on the read path before giving up. */
+        if (errno == EREMOTEIO && eremoteio++ < I2C_READ_RETRIES) {
+            struct timespec ts = { 0, I2C_RETRY_US * 1000L };
+            nanosleep(&ts, NULL);
+            continue;
+        }
         LOGE("i2c: write errno %d (%s)", errno, strerror(errno));
         return -1;
     }
@@ -67,10 +84,16 @@ int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len)
 int pn7160_i2c_read(pn7160_i2c *i, uint8_t *buf, size_t len)
 {
     if (!i || i->fd < 0) return -1;
+    int eremoteio = 0;
     for (;;) {
         ssize_t n = read(i->fd, buf, len);
         if (n >= 0) return (int)n;
         if (errno == EINTR || errno == EAGAIN) continue;
+        if (errno == EREMOTEIO && eremoteio++ < I2C_READ_RETRIES) {
+            struct timespec ts = { 0, I2C_RETRY_US * 1000L };
+            nanosleep(&ts, NULL);
+            continue;
+        }
         LOGE("i2c: read errno %d (%s)", errno, strerror(errno));
         return -1;
     }

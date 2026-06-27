@@ -29,6 +29,7 @@ typedef struct {
     uint8_t  ti[4];          /* Transaction Identifier */
     uint16_t cmd_ctr;        /* command counter */
     uint16_t frame_size;     /* ISO 14443-4 FSC (64..256); bounds read/write chunks */
+    uint8_t  last_status;    /* DESFire status byte of the last transact (0 = OK) */
 } desfire_ev2_session;
 
 /* AuthenticateEV2First with an AES-128 key. On success *s holds a live
@@ -63,6 +64,22 @@ int desfire_ev2_get_card_uid(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 int desfire_ev2_get_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                   uint8_t file_no, uint8_t *out, size_t out_cap,
                                   size_t *out_len);
+
+/* In-session (MACed) enumeration. Once a session is active, EVERY command must
+ * be MACed or the card's command counter desynchronises and all later secure
+ * commands fail. These are the session-safe forms of GetFileIDs (0x6F) and
+ * GetApplicationIDs (0x6A); the public wrappers pick them automatically while
+ * a session is live. */
+int desfire_ev2_get_file_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                             uint8_t *fids, size_t cap, size_t *count);
+int desfire_ev2_get_application_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                    uint32_t *aids, size_t cap, size_t *count);
+
+/* A CommMode.Plain command inside an active session: no MAC, but the card's
+ * CmdCtr still advances, so this bumps the session counter to stay in sync. */
+int desfire_ev2_plain(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t ins,
+                      const uint8_t *data, uint8_t data_len,
+                      uint8_t *out, size_t out_cap, size_t *out_len);
 
 /* DESFire comm mode for file data (matches the file's CommSettings). */
 #define DF_COMM_PLAIN 0x00
@@ -111,4 +128,10 @@ int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                            uint8_t key_no, const uint8_t old_key[16],
                            const uint8_t new_key[16], uint8_t new_version);
 
+int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                     uint8_t comm, uint8_t file_no, uint8_t file_option,
+                                     uint16_t access_rights,
+                                     const uint8_t *sdm_data, size_t sdm_len);
+
 #endif /* PN7160_DESFIRE_EV2_H */
+

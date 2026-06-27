@@ -66,12 +66,35 @@ static int read_binary(apdu_fn fn, void *ctx, uint16_t offset, uint8_t le,
     return PN7160_OK;
 }
 
-int t4t_read_ndef(apdu_fn fn, void *ctx,
-                  uint8_t *out, size_t out_cap, size_t *out_len)
+/* UPDATE BINARY: write len bytes at offset (P1P2). */
+static int update_binary(apdu_fn fn, void *ctx, uint16_t offset,
+                         const uint8_t *data, uint8_t len)
 {
-    static const uint8_t ndef_aid[7] =
-        { 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01 };
+    uint8_t cmd[5 + 255]; size_t i = 0;
+    cmd[i++] = 0x00; cmd[i++] = 0xD6;
+    cmd[i++] = (uint8_t)(offset >> 8); cmd[i++] = (uint8_t)(offset & 0xFF);
+    cmd[i++] = len;
+    memcpy(cmd + i, data, len); i += len;
+    uint8_t rx[16]; size_t rn = 0;
+    if (fn(ctx, cmd, i, rx, sizeof rx, &rn) < 0) return PN7160_ERR;
+    return sw_ok(rx, rn) ? PN7160_OK : PN7160_ERR;
+}
 
+static const uint8_t ndef_aid[7] = { 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01 };
+
+/* Parsed Capability Container of a Type 4 NDEF tag. */
+typedef struct {
+    uint16_t ndef_fid;     /* NDEF file id (usually 0xE104)            */
+    uint16_t max_ndef;     /* max NDEF message size                    */
+    uint16_t mlc;          /* max bytes per UPDATE BINARY (CC MLc)     */
+    uint8_t  read_acc;     /* 0x00 = free read                        */
+    uint8_t  write_acc;    /* 0x00 = free write, 0xFF = read-only      */
+} t4t_cc;
+
+/* SELECT the NDEF application + CC file and parse the CC. Leaves the CC file
+ * selected. */
+static int open_cc(apdu_fn fn, void *ctx, t4t_cc *cc)
+{
     if (select_aid(fn, ctx, ndef_aid, sizeof ndef_aid) != PN7160_OK) {
         LOGE("t4t: NDEF application not found (not a Type 4 NDEF tag?)");
         return PN7160_ERR;
@@ -80,30 +103,111 @@ int t4t_read_ndef(apdu_fn fn, void *ctx,
         LOGE("t4t: CC file (E103) select failed");
         return PN7160_ERR;
     }
-
-    /* Capability Container, first 15 bytes:
-     *   [0..1] CCLEN, [2] mapping ver, [3..4] MLe, [5..6] MLc,
-     *   then the NDEF File Control TLV (T=0x04, L=0x06,
-     *   [0..1] NDEF file id, [2..3] max NDEF size, [4] read access,
-     *   [5] write access). */
-    uint8_t cc[32]; size_t cclen = 0;
-    if (read_binary(fn, ctx, 0, 15, cc, sizeof cc, &cclen) != PN7160_OK ||
-        cclen < 15) {
-        LOGE("t4t: CC read too short (%zu)", cclen);
+    /* CC: [0..1] CCLEN, [2] ver, [3..4] MLe, [5..6] MLc, then the NDEF File
+     * Control TLV: [7] T=0x04, [8] L=0x06, [9..10] file id, [11..12] max size,
+     * [13] read access, [14] write access. */
+    uint8_t b[32]; size_t n = 0;
+    if (read_binary(fn, ctx, 0, 15, b, sizeof b, &n) != PN7160_OK || n < 15) {
+        LOGE("t4t: CC read too short (%zu)", n);
         return PN7160_ERR;
     }
-    if (cc[7] != 0x04 || cc[8] < 0x06) {
+    if (b[7] != 0x04 || b[8] < 0x06) {
         LOGE("t4t: NDEF File Control TLV not found in CC");
         return PN7160_ERR;
     }
-    uint16_t ndef_fid = (uint16_t)((cc[9] << 8) | cc[10]);
-    uint16_t max_ndef = (uint16_t)((cc[11] << 8) | cc[12]);
-    uint8_t  read_acc = cc[13];
-    if (read_acc != 0x00) {
-        LOGE("t4t: NDEF file requires authentication (read access 0x%02x)",
-             read_acc);
+    cc->mlc       = (uint16_t)((b[5] << 8) | b[6]);
+    cc->ndef_fid  = (uint16_t)((b[9] << 8) | b[10]);
+    cc->max_ndef  = (uint16_t)((b[11] << 8) | b[12]);
+    cc->read_acc  = b[13];
+    cc->write_acc = b[14];
+    return PN7160_OK;
+}
+
+int t4t_check(apdu_fn fn, void *ctx, hci_ndef_info *out)
+{
+    if (!out) return PN7160_ERR;
+    memset(out, 0, sizeof *out);
+    t4t_cc cc;
+    if (open_cc(fn, ctx, &cc) != PN7160_OK) return PN7160_ERR;
+    out->is_ndef    = true;
+    out->writable   = (cc.write_acc == 0x00);
+    out->max_length = cc.max_ndef;
+    if (select_ef(fn, ctx, cc.ndef_fid) != PN7160_OK) return PN7160_ERR;
+    uint8_t nb[2]; size_t got = 0;
+    if (read_binary(fn, ctx, 0, 2, nb, sizeof nb, &got) != PN7160_OK || got < 2)
+        return PN7160_ERR;
+    out->ndef_length = (uint16_t)((nb[0] << 8) | nb[1]);
+    return PN7160_OK;
+}
+
+int t4t_write_ndef(apdu_fn fn, void *ctx, const uint8_t *msg, size_t len)
+{
+    if (len > 0xFFFE) return PN7160_ERR;
+    t4t_cc cc;
+    if (open_cc(fn, ctx, &cc) != PN7160_OK) return PN7160_ERR;
+    if (cc.write_acc != 0x00) {
+        LOGE("t4t: NDEF file is not writable (write access 0x%02x)", cc.write_acc);
         return PN7160_ERR;
     }
+    if (cc.max_ndef && len > cc.max_ndef) {
+        LOGE("t4t: message %zu exceeds max NDEF size %u", len, cc.max_ndef);
+        return PN7160_ERR;
+    }
+    if (select_ef(fn, ctx, cc.ndef_fid) != PN7160_OK) return PN7160_ERR;
+
+    /* Per the T4T spec: write NLEN=0, then the message, then the real NLEN, so
+     * a concurrent reader never sees a half-written message. */
+    uint8_t zero[2] = { 0, 0 };
+    if (update_binary(fn, ctx, 0, zero, 2) != PN7160_OK) return PN7160_ERR;
+
+    uint8_t chunk = (cc.mlc && cc.mlc < 0xFF) ? (uint8_t)cc.mlc : 0xFC;
+    size_t done = 0;
+    while (done < len) {
+        size_t want = len - done;
+        if (want > chunk) want = chunk;
+        if (update_binary(fn, ctx, (uint16_t)(2 + done), msg + done,
+                          (uint8_t)want) != PN7160_OK)
+            return PN7160_ERR;
+        done += want;
+    }
+    uint8_t nlen[2] = { (uint8_t)(len >> 8), (uint8_t)(len & 0xFF) };
+    if (update_binary(fn, ctx, 0, nlen, 2) != PN7160_OK) return PN7160_ERR;
+    LOGD("t4t: wrote %zu byte NDEF message", len);
+    return PN7160_OK;
+}
+
+int t4t_format(apdu_fn fn, void *ctx)
+{
+    t4t_cc cc;
+    if (open_cc(fn, ctx, &cc) != PN7160_OK) return PN7160_ERR;
+    if (cc.write_acc != 0x00) return PN7160_ERR;
+    if (select_ef(fn, ctx, cc.ndef_fid) != PN7160_OK) return PN7160_ERR;
+    uint8_t zero[2] = { 0, 0 };
+    return update_binary(fn, ctx, 0, zero, 2);   /* NLEN = 0 */
+}
+
+int t4t_make_read_only(apdu_fn fn, void *ctx)
+{
+    t4t_cc cc;
+    if (open_cc(fn, ctx, &cc) != PN7160_OK) return PN7160_ERR;
+    /* Patch the CC's write-access byte (offset 14) to 0xFF. The CC file is
+     * still selected from open_cc. Fails if the CC is not writable. */
+    uint8_t ro = 0xFF;
+    return update_binary(fn, ctx, 14, &ro, 1);
+}
+
+int t4t_read_ndef(apdu_fn fn, void *ctx,
+                  uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    t4t_cc cc;
+    if (open_cc(fn, ctx, &cc) != PN7160_OK) return PN7160_ERR;
+    if (cc.read_acc != 0x00) {
+        LOGE("t4t: NDEF file requires authentication (read access 0x%02x)",
+             cc.read_acc);
+        return PN7160_ERR;
+    }
+    uint16_t ndef_fid = cc.ndef_fid;
+    uint16_t max_ndef = cc.max_ndef;
     LOGD("t4t: NDEF file id 0x%04x, max %u bytes, free read", ndef_fid, max_ndef);
 
     if (select_ef(fn, ctx, ndef_fid) != PN7160_OK) {

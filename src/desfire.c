@@ -161,15 +161,31 @@ int desfire_read_data_plain(apdu_fn fn, void *ctx, uint8_t file_no,
 const char *pn7160_desfire_product(const pn7160_desfire_version *v)
 {
     if (!v) return "unknown";
-    /* NXP (0x04) MIFARE DESFire family: sw_major encodes the generation. */
-    if (v->hw_vendor != 0x04 || v->hw_type != 0x01) return "non-DESFire";
+    if (v->hw_vendor != 0x04) return "non-NXP";
+
+    /* NTAG DNA family (hw_type 0x04): ISO-DEP tags with DESFire-EV2-style
+     * secure messaging and SDM. major 0x30 = NTAG 42x DNA. */
+    if (v->hw_type == 0x04) {
+        if (v->hw_major == 0x30)
+            return (v->hw_storage == 0x11) ? "NTAG 424 DNA" : "NTAG 41x DNA";
+        return "NTAG DNA";
+    }
+
+    /* MIFARE DESFire family (hw_type 0x01). The generation is most reliably
+     * read from the hardware major version (sw_major can read e.g. 0x03 on an
+     * EV3, 0x33-HW card), so key on hw_major first and fall back to sw_major. */
+    if (v->hw_type != 0x01) return "non-DESFire";
+    switch (v->hw_major) {
+    case 0x01: return "DESFire EV1";
+    case 0x12: return "DESFire EV2";
+    case 0x33: return "DESFire EV3";
+    default: break;
+    }
     switch (v->sw_major) {
     case 0x00: return "DESFire (EV0/D40)";
     case 0x01: return "DESFire EV1";
-    case 0x12: return "DESFire EV2";
-    case 0x22: return "DESFire EV2";
-    case 0x30: return "DESFire EV3";
-    case 0x33: return "DESFire EV3";
+    case 0x12: case 0x22: return "DESFire EV2";
+    case 0x30: case 0x33: return "DESFire EV3";
     default:   return "DESFire (unknown gen)";
     }
 }

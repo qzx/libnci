@@ -5,7 +5,10 @@
  * No hardware, no libgpiod.
  */
 #include "t4t.h"
+#include "mifare.h"
+#include "mfc_ndef.h"
 #include "desfire.h"
+#include "desfire_ev3.h"
 #include "pn7160/ndef.h"
 
 #include <assert.h>
@@ -164,6 +167,146 @@ static void test_desfire_error_status(void)
     printf("  desfire_error_status: OK (0x91AE rejected)\n");
 }
 
+/* EV3 command-data serialisers (byte layout, no session needed). */
+static void test_desfire_ev3_params(void)
+{
+    /* CreateValueFile: file 1, FULL, access 0x1234, lower 0, upper 1000,
+     * value 50, limited-credit on. */
+    uint8_t v[17];
+    size_t n = desfire_ev3_value_params(v, 0x01, 0x03, 0x1234, 0, 1000, 50, 1);
+    assert(n == 17);
+    assert(v[0] == 0x01 && v[1] == 0x03);
+    assert(v[2] == 0x34 && v[3] == 0x12);              /* access LE */
+    assert(v[4] == 0 && v[5] == 0 && v[6] == 0 && v[7] == 0);   /* lower=0 */
+    assert(v[8] == 0xE8 && v[9] == 0x03);              /* upper=1000 LE */
+    assert(v[12] == 50);                               /* value LE */
+    assert(v[16] == 0x01);                             /* limited credit */
+
+    /* Record file with ISO id 0x0405: file 2, MAC, access 0x00EE,
+     * rec_size 16, max 5. */
+    uint8_t r[12];
+    n = desfire_ev3_record_params(r, 0x02, 0x0405, 0x01, 0x00EE, 16, 5);
+    assert(n == 12);                                   /* file+iso+comm+acc+sz+max */
+    assert(r[0] == 0x02);
+    assert(r[1] == 0x05 && r[2] == 0x04);              /* iso id LE */
+    assert(r[3] == 0x01);                              /* comm */
+    assert(r[4] == 0xEE && r[5] == 0x00);              /* access LE */
+    assert(r[6] == 16 && r[7] == 0 && r[8] == 0);      /* rec size 24-bit */
+    assert(r[9] == 5 && r[10] == 0 && r[11] == 0);     /* max records 24-bit */
+
+    /* Without ISO id: file+comm+access+rec_size+max = 10 bytes. */
+    n = desfire_ev3_record_params(r, 0x02, -1, 0x01, 0x00EE, 16, 5);
+    assert(n == 10 && r[0] == 0x02 && r[1] == 0x01);
+    printf("  desfire_ev3_params: OK\n");
+}
+
+/* ========================================================= MIFARE ===== */
+/* Mock raw-exchange: assert the proprietary header bytes, return canned replies
+ * by command shape. */
+static int mfc_mock(void *ctx, const uint8_t *tx, size_t tx_len,
+                    uint8_t *rx, size_t rx_cap, size_t *rx_len)
+{
+    (void)ctx; (void)rx_cap;
+    size_t n = 0;
+    if (tx[0] == 0x40) {                 /* authenticate */
+        assert(tx_len == 9);
+        assert(tx[1] == 4 / 4);                    /* block 4 -> sector 1 addr */
+        assert(tx[2] == 0x10 || tx[2] == 0x90);   /* embedded key, A or B */
+        rx[n++] = 0x40; rx[n++] = 0x00;           /* auth OK */
+    } else if (tx[0] == 0x10 && tx[1] == 0x30) {  /* read block */
+        assert(tx_len == 3);
+        rx[n++] = 0x10;
+        for (int i = 0; i < 16; i++) rx[n++] = (uint8_t)(0xB0 + i);
+        rx[n++] = 0x00;                            /* status */
+    } else if (tx[0] == 0x10 && tx_len == 3) {     /* a command (or transfer) */
+        rx[n++] = 0x10; rx[n++] = 0x0a; rx[n++] = 0x14;  /* card ACK */
+    } else if (tx[0] == 0x10 && tx_len == 1 + 4) { /* value operand phase */
+        rx[n++] = 0x10; rx[n++] = 0xB2;            /* card silent -> 0xB2 success */
+    } else if (tx[0] == 0x10 && tx_len == 1 + 16) {/* write data phase */
+        rx[n++] = 0x10; rx[n++] = 0x0a; rx[n++] = 0x14;  /* card ACK */
+    } else {
+        return -1;
+    }
+    *rx_len = n;
+    return 0;
+}
+
+static void test_mifare(void)
+{
+    /* auth Key A, default key */
+    static const uint8_t key[6] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
+    assert(mfc_auth(mfc_mock, NULL, 4, MFC_KEY_A, key) == PN7160_OK);
+    /* read block -> the canned 0xB0.. pattern */
+    uint8_t blk[16];
+    assert(mfc_read(mfc_mock, NULL, 4, blk) == PN7160_OK);
+    assert(blk[0] == 0xB0 && blk[15] == 0xBF);
+    /* write block (single packet: 10 A0 <block> <16 data>) */
+    uint8_t data[16] = {0};
+    assert(mfc_write(mfc_mock, NULL, 4, data) == PN7160_OK);
+    /* value command (single packet: 10 C1 <block> <4B operand>) */
+    assert(mfc_value_cmd(mfc_mock, NULL, MFC_CMD_INC, 5, 50) == PN7160_OK);
+
+    /* value-block encode/decode round-trip */
+    uint8_t vb[16];
+    mfc_value_encode(vb, -12345, 0x05);
+    assert(vb[0] == (uint8_t)~vb[4] && vb[0] == vb[8]);   /* format invariants */
+    assert(vb[12] == 0x05 && vb[13] == (uint8_t)~0x05);
+    int32_t v = 0;
+    assert(mfc_value_decode(vb, &v) == PN7160_OK && v == -12345);
+    /* a corrupted value block is rejected */
+    vb[4] ^= 0xFF;
+    assert(mfc_value_decode(vb, &v) != PN7160_OK);
+    printf("  mifare: OK (auth/read/write framing, value block)\n");
+}
+
+/* RAM-backed MIFARE 1K for the NDEF-over-MAD round trip (64 blocks). */
+static uint8_t mfc_ram[64][16];
+static int ram_io(void *ctx, uint8_t block, uint8_t *data, int is_write)
+{
+    (void)ctx;
+    if (block >= 64) return -1;
+    if (is_write) memcpy(mfc_ram[block], data, 16);
+    else          memcpy(data, mfc_ram[block], 16);
+    return 0;
+}
+
+static void test_mfc_ndef(void)
+{
+    /* MAD CRC-8 (poly 0x1D, init 0xC7) of an all-NDEF MAD1 (Info=0x01, every
+     * sector AID = 03 E1) is 0x14 - matches NXP's phFriNfc_MifStdFormat. */
+    static const uint8_t mad[31] = {
+        0x01, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1,
+        0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03,
+        0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1, 0x03, 0xe1,
+    };
+    assert(mfc_mad_crc8(mad, sizeof mad) == 0x14);
+
+    memset(mfc_ram, 0, sizeof mfc_ram);
+    /* A small NDEF message (URI record "https://qzx.is"). */
+    static const uint8_t msg[] = {
+        0xD1, 0x01, 0x0B, 0x55, 0x04, 'q','z','x','.','i','s','/','h','i',
+    };
+    assert(mfc_ndef_write(ram_io, NULL, msg, sizeof msg) == PN7160_OK);
+    /* MAD entry for sector 1 must read as NDEF (03 E1 at block1[2..3]). */
+    assert(mfc_ram[1][2] == 0x03 && mfc_ram[1][3] == 0xE1);
+    /* MAD CRC byte must match a recompute over block1[1..15] + block2[0..15]. */
+    uint8_t crcbuf[31];
+    memcpy(crcbuf, &mfc_ram[1][1], 15);
+    memcpy(crcbuf + 15, mfc_ram[2], 16);
+    assert(mfc_ram[1][0] == mfc_mad_crc8(crcbuf, sizeof crcbuf));
+    /* Data sector 1 holds the TLV: 03 <len> D1 ... */
+    assert(mfc_ram[4][0] == 0x03 && mfc_ram[4][1] == sizeof msg);
+
+    uint8_t out[256]; size_t olen = 0;
+    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == PN7160_OK);
+    assert(olen == sizeof msg && memcmp(out, msg, olen) == 0);
+
+    /* format -> empty NDEF reads back as zero length */
+    assert(mfc_ndef_write(ram_io, NULL, NULL, 0) == PN7160_OK);
+    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == PN7160_OK && olen == 0);
+    printf("  mfc_ndef: OK (MAD CRC, write/read round trip, format)\n");
+}
+
 int main(void)
 {
     printf("test_cards:\n");
@@ -173,6 +316,9 @@ int main(void)
     test_desfire_get_version();
     test_desfire_apps_and_files();
     test_desfire_error_status();
+    test_desfire_ev3_params();
+    test_mifare();
+    test_mfc_ndef();
     printf("all tests passed\n");
     return 0;
 }

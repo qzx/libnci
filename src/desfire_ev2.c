@@ -185,22 +185,26 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                          resp, sizeof resp, &rn, &status) != PN7160_OK)
         return PN7160_ERR;
 
-    /* EV2: the card advances CmdCtr for EVERY command it processes, including
-     * ones returning a DESFire error (verified on hardware: a GetKeyVersion
-     * after a file-not-found delete fails unless we also advance here). The
-     * response MAC and IV use the incremented value. */
-    s->cmd_ctr++;
-    ctr_lo = (uint8_t)(s->cmd_ctr & 0xFF);
-    ctr_hi = (uint8_t)((s->cmd_ctr >> 8) & 0xFF);
-
+    s->last_status = status;
     if (status != ST_OK) {
-        /* A DESFire error desynchronises the EV2 secure channel on this card
-         * (a later command fails until re-authentication). Mark the session
-         * dead so the caller re-authenticates rather than sending garbage. */
-        LOGE("ev2: ins 0x%02x status 0x91%02x - session invalidated", ins, status);
+        /* On a DESFire EV3 a command that ends in an error status terminates
+         * the EV2 secure channel: the next command - however well formed -
+         * comes back 0x7E because the session is gone (verified on hardware for
+         * both file-not-found GetFileSettings and DeleteFile). So mark the
+         * session inactive and surface last_status; the caller re-authenticates
+         * before continuing. (A long-lived session is fully robust as long as
+         * its commands succeed - see the many-command test.) */
+        LOGE("ev2: ins 0x%02x status 0x91%02x - session ended (re-auth needed)",
+             ins, status);
         s->active = false;
         return PN7160_ERR;
     }
+
+    /* Success: the card has advanced its CmdCtr; match it. The response MAC and
+     * any response IV use this incremented value. */
+    s->cmd_ctr++;
+    ctr_lo = (uint8_t)(s->cmd_ctr & 0xFF);
+    ctr_hi = (uint8_t)((s->cmd_ctr >> 8) & 0xFF);
     if (rn < 8) { LOGE("ev2: response missing MAC"); return PN7160_ERR; }
     size_t enc_resp_len = rn - 8;
     const uint8_t *resp_mac = resp + enc_resp_len;
@@ -237,6 +241,33 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     return PN7160_OK;
 }
 
+/* A CommMode.Plain command issued inside an active EV2 session. Such a command
+ * carries no MAC (the session's authentication still grants access and the
+ * response is plain), BUT the card advances its CmdCtr just as it does for a
+ * MACed command - so we must advance ours too or the next MACed command
+ * desynchronises. Verified on hardware: a plain ReadData of a CommMode.Plain
+ * file returns data fine, then a following GetFileSettings fails 0x1E unless
+ * we bump the counter here. */
+int desfire_ev2_plain(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t ins,
+                      const uint8_t *data, uint8_t data_len,
+                      uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!s || !s->active) { LOGE("ev2: no session"); return PN7160_ERR; }
+    uint8_t status = 0; size_t n = 0;
+    if (desfire_apdu_raw(fn, ctx, ins, data, data_len, out, out_cap, &n, &status)
+        != PN7160_OK)
+        return PN7160_ERR;
+    s->last_status = status;
+    if (status != ST_OK) {
+        LOGE("ev2: plain ins 0x%02x status 0x91%02x - session ended", ins, status);
+        s->active = false;
+        return PN7160_ERR;
+    }
+    s->cmd_ctr++;
+    if (out_len) *out_len = n;
+    return PN7160_OK;
+}
+
 static void le24(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);
@@ -258,7 +289,7 @@ static size_t frame_data_chunk(uint16_t fsc, bool full)
     return max_ct > 16 ? max_ct - 1 : 15;         /* room for the 0x80 pad */
 }
 
-static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, bool dec,
+static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm,
                     uint8_t file_no, uint32_t offset, uint32_t length,
                     uint8_t *out, size_t out_cap, size_t *out_len)
 {
@@ -267,9 +298,16 @@ static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, bool dec,
     le24(hdr + 1, offset);
     le24(hdr + 4, length);
     uint8_t buf[512]; size_t n = 0;
-    if (desfire_ev2_transact(fn, ctx, s, INS_READ_DATA, hdr, 7, NULL, 0,
-                             false, dec, buf, sizeof buf, &n) != PN7160_OK)
+    bool dec = (comm == DF_COMM_FULL);
+    if (comm == DF_COMM_PLAIN) {
+        /* CommMode.Plain file: command + response are plain; CmdCtr advances. */
+        if (desfire_ev2_plain(fn, ctx, s, INS_READ_DATA, hdr, 7, buf, sizeof buf,
+                              &n) != PN7160_OK)
+            return PN7160_ERR;
+    } else if (desfire_ev2_transact(fn, ctx, s, INS_READ_DATA, hdr, 7, NULL, 0,
+                                    false, dec, buf, sizeof buf, &n) != PN7160_OK) {
         return PN7160_ERR;
+    }
     size_t take = (length && length < n) ? length : n;   /* trim padding */
     if (!length && dec) {
         while (take > 0 && buf[take - 1] == 0x00) take--;
@@ -289,7 +327,7 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     if (!s) return PN7160_ERR;
     bool dec = (comm == DF_COMM_FULL);
     if (length == 0)   /* whole file in one go (caller-bounded by out_cap) */
-        return read_one(fn, ctx, s, dec, file_no, offset, 0, out, out_cap, out_len);
+        return read_one(fn, ctx, s, comm, file_no, offset, 0, out, out_cap, out_len);
 
     /* Split into frame-sized reads at successive offsets. */
     size_t chunk = frame_data_chunk(s->frame_size, dec);
@@ -299,7 +337,7 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         size_t got = 0;
         if (total + n > out_cap) n = (uint32_t)(out_cap - total);
         if (n == 0) break;
-        if (read_one(fn, ctx, s, dec, file_no, offset + done, n,
+        if (read_one(fn, ctx, s, comm, file_no, offset + done, n,
                      out + total, out_cap - total, &got) != PN7160_OK)
             return PN7160_ERR;
         total += got; done += n;
@@ -317,7 +355,7 @@ int desfire_ev2_read_data_full(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                  length, out, out_cap, out_len);
 }
 
-static int write_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, bool enc,
+static int write_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm,
                      uint8_t file_no, uint32_t offset, const uint8_t *data,
                      uint32_t len)
 {
@@ -326,8 +364,17 @@ static int write_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, bool enc,
     le24(hdr + 1, offset);
     le24(hdr + 4, len);
     uint8_t out[32]; size_t n = 0;
+    if (comm == DF_COMM_PLAIN) {
+        /* CommMode.Plain file: header + data sent plain; CmdCtr advances. */
+        uint8_t cmd[7 + 248];
+        if (len > sizeof cmd - 7) return PN7160_ERR;
+        memcpy(cmd, hdr, 7);
+        if (len) memcpy(cmd + 7, data, len);
+        return desfire_ev2_plain(fn, ctx, s, 0x3D, cmd, (uint8_t)(7 + len),
+                                 out, sizeof out, &n);
+    }
     return desfire_ev2_transact(fn, ctx, s, 0x3D, hdr, 7, data, len,
-                                enc, false, out, sizeof out, &n);
+                                comm == DF_COMM_FULL, false, out, sizeof out, &n);
 }
 
 int desfire_ev2_write_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -338,12 +385,12 @@ int desfire_ev2_write_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     bool enc = (comm == DF_COMM_FULL);
     size_t chunk = frame_data_chunk(s->frame_size, enc);  /* per-frame max */
     if (len == 0)
-        return write_one(fn, ctx, s, enc, file_no, offset, data, 0);
+        return write_one(fn, ctx, s, comm, file_no, offset, data, 0);
     /* Split into frame-sized writes at successive file offsets (each a full
      * EV2 command, so this works on Standard files without chaining). */
     for (uint32_t done = 0; done < len; ) {
         uint32_t n = (len - done) < chunk ? (len - done) : (uint32_t)chunk;
-        if (write_one(fn, ctx, s, enc, file_no, offset + done, data + done, n) != PN7160_OK)
+        if (write_one(fn, ctx, s, comm, file_no, offset + done, data + done, n) != PN7160_OK)
             return PN7160_ERR;
         done += n;
     }
@@ -521,3 +568,55 @@ int desfire_ev2_get_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     return desfire_ev2_transact(fn, ctx, s, 0xF5, &file_no, 1, NULL, 0,
                                 false, false, out, out_cap, out_len);
 }
+
+int desfire_ev2_get_file_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                             uint8_t *fids, size_t cap, size_t *count)
+{
+    uint8_t out[64]; size_t n = 0;
+    if (desfire_ev2_transact(fn, ctx, s, 0x6F, NULL, 0, NULL, 0,
+                             false, false, out, sizeof out, &n) != PN7160_OK)
+        return PN7160_ERR;
+    if (count) *count = n;
+    if (fids) { size_t m = n < cap ? n : cap; memcpy(fids, out, m); }
+    return PN7160_OK;
+}
+
+int desfire_ev2_get_application_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                    uint32_t *aids, size_t cap, size_t *count)
+{
+    uint8_t out[256]; size_t n = 0;
+    if (desfire_ev2_transact(fn, ctx, s, 0x6A, NULL, 0, NULL, 0,
+                             false, false, out, sizeof out, &n) != PN7160_OK)
+        return PN7160_ERR;
+    size_t na = n / 3;
+    if (count) *count = na;
+    if (aids) {
+        size_t m = na < cap ? na : cap;
+        for (size_t i = 0; i < m; i++)
+            aids[i] = (uint32_t)out[3 * i] | ((uint32_t)out[3 * i + 1] << 8) |
+                      ((uint32_t)out[3 * i + 2] << 16);
+    }
+    return PN7160_OK;
+}
+
+int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                     uint8_t comm, uint8_t file_no, uint8_t file_option,
+                                     uint16_t access_rights,
+                                     const uint8_t *sdm_data, size_t sdm_len)
+{
+    uint8_t p[64];
+    size_t i = 0;
+    p[i++] = file_option;
+    p[i++] = (uint8_t)(access_rights & 0xFF);
+    p[i++] = (uint8_t)((access_rights >> 8) & 0xFF);
+    if (sdm_len > 0 && sdm_data) {
+        if (i + sdm_len > sizeof p) return PN7160_ERR;
+        memcpy(p + i, sdm_data, sdm_len);
+        i += sdm_len;
+    }
+
+    uint8_t out[16]; size_t rn = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0x5F, &file_no, 1, p, i,
+                                comm == DF_COMM_FULL, false, out, sizeof out, &rn);
+}
+

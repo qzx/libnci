@@ -22,6 +22,8 @@ typedef struct {
     int            count;
     int            idx;
     int            writes;
+    uint8_t        last_cmd[260];      /* capture the most recent command   */
+    size_t         last_cmd_len;
 } mock;
 
 static int mock_write(void *ctx, const uint8_t *buf, size_t len)
@@ -30,6 +32,9 @@ static int mock_write(void *ctx, const uint8_t *buf, size_t len)
     assert(len >= 3);
     assert((buf[0] & 0xE0) == 0x20);   /* must be an NCI command (MT=CMD) */
     m->writes++;
+    size_t n = len < sizeof m->last_cmd ? len : sizeof m->last_cmd;
+    memcpy(m->last_cmd, buf, n);
+    m->last_cmd_len = n;
     return (int)len;
 }
 
@@ -142,12 +147,96 @@ static void test_bad_status_fails(void)
     printf("  bad_status_fails: OK\n");
 }
 
+/* #1: RF_DISCOVER built from a technology mask emits only the chosen techs. */
+static void test_discover_mask(void)
+{
+    static const uint8_t DISC_RSP_OK[] = { 0x41, 0x03, 0x01, 0x00 };
+    mock m = {0};
+    pn7160_transport t = {
+        .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+    };
+    mock_push(&m, DISC_RSP_OK, sizeof DISC_RSP_OK);
+    assert(nci_rf_discover_mask(&t, HCI_TECH_A | HCI_TECH_B) == PN7160_OK);
+    /* Expect: 21 03 05 02 <A_poll> 01 <B_poll> 01 */
+    assert(m.last_cmd_len == 8);
+    assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x03);
+    assert(m.last_cmd[3] == 0x02);            /* 2 config entries          */
+    assert(m.last_cmd[4] == 0x00 && m.last_cmd[5] == 0x01);  /* NFC-A poll  */
+    assert(m.last_cmd[6] == 0x01 && m.last_cmd[7] == 0x01);  /* NFC-B poll  */
+    printf("  discover_mask: OK (A|B -> 2 entries)\n");
+}
+
+/* #2: a multi-target RF_DISCOVER_NTF list is collected, not auto-activated. */
+static void test_poll_multi(void)
+{
+    /* Two NFC-A targets. NTF payload: disc_id, proto, tech, tlen, tparams,
+     * notif_type (NCI: 0x02 = more follow, 0x00/0x01 = last). */
+    static const uint8_t NTF1[] = {
+        0x61, 0x03, 0x09, 0x01, 0x04, 0x00, 0x03, 0x44, 0x00, 0x00, 0x02,
+    };  /* disc 1, ISO-DEP, NFC-A, 3 tparams, more (0x02) */
+    static const uint8_t NTF2[] = {
+        0x61, 0x03, 0x09, 0x02, 0x02, 0x00, 0x03, 0x44, 0x00, 0x00, 0x00,
+    };  /* disc 2, T2T, NFC-A, last (0x00) */
+    mock m = {0};
+    pn7160_transport t = {
+        .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+    };
+    mock_push(&m, NTF1, sizeof NTF1);
+    mock_push(&m, NTF2, sizeof NTF2);
+
+    pn7160_tag tag; nci_rf_conn conn; nci_disc_target tg[4]; size_t n = 0;
+    int r = nci_poll_ex(&t, &tag, &conn, tg, 4, &n, 100);
+    assert(r == NCI_POLL_MULTI);
+    assert(n == 2);
+    assert(tg[0].rf_disc_id == 1 && tg[0].rf_protocol == 0x04);
+    assert(tg[1].rf_disc_id == 2 && tg[1].rf_protocol == 0x02);
+    printf("  poll_multi: OK (2 targets: ISO-DEP + T2T)\n");
+}
+
+/* #3: RF_DISCOVER_SELECT emits the right command and maps proto -> interface. */
+static void test_discover_select(void)
+{
+    static const uint8_t SEL_RSP[] = { 0x41, 0x04, 0x01, 0x00 };
+    mock m = {0};
+    pn7160_transport t = {
+        .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+    };
+    mock_push(&m, SEL_RSP, sizeof SEL_RSP);
+    /* select disc 2, ISO-DEP -> interface 0x02 */
+    assert(nci_iface_for_protocol(0x04) == 0x02);
+    assert(nci_iface_for_protocol(0x02) == 0x01);   /* T2T -> Frame */
+    assert(nci_rf_discover_select(&t, 0x02, 0x04, 0x02) == PN7160_OK);
+    assert(m.last_cmd_len == 6);
+    assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x04 && m.last_cmd[2] == 0x03);
+    assert(m.last_cmd[3] == 0x02 && m.last_cmd[4] == 0x04 && m.last_cmd[5] == 0x02);
+    printf("  discover_select: OK\n");
+}
+
+/* #6: RF_DEACTIVATE emits the requested mode byte. */
+static void test_deactivate_modes(void)
+{
+    static const uint8_t DEACT_RSP[] = { 0x41, 0x06, 0x01, 0x00 };
+    mock m = {0};
+    pn7160_transport t = {
+        .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+    };
+    mock_push(&m, DEACT_RSP, sizeof DEACT_RSP);
+    assert(nci_rf_deactivate(&t, 0x01 /*Sleep*/) == PN7160_OK);
+    assert(m.last_cmd_len == 4);
+    assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x06 && m.last_cmd[3] == 0x01);
+    printf("  deactivate_modes: OK (Sleep=0x01)\n");
+}
+
 int main(void)
 {
     printf("test_nci:\n");
     test_parse_nfca();
     test_bringup_and_uid();
     test_bad_status_fails();
+    test_discover_mask();
+    test_poll_multi();
+    test_discover_select();
+    test_deactivate_modes();
     printf("all tests passed\n");
     return 0;
 }

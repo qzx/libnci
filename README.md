@@ -1,38 +1,47 @@
-# pn7160 — a clean PN7160 NFC driver on libgpiod v2
+# libhcinfc — a modern NFC reader/writer stack for Linux
 
-A from-scratch, modular reimplementation of the PN7160 transport/control layer,
-built against the **libgpiod v2** API. Scope for v0: **bring the chip up over
-I2C and detect a tag.**
+A from-scratch, modular NFC library built against the **libgpiod v2** API. The
+**PN7160/PN7161** is the first supported controller, but the public surface is
+chipset-neutral: adding another NCI controller (PN7150, PN5180, …) is a new entry
+in the chipset registry under `src/chips/`, not a change to any public header.
 
-Design rationale and the full v1→v2 migration notes:
-[`../doc/PN7160_libgpiod2_library_design.md`](../doc/PN7160_libgpiod2_library_design.md).
+The generic API is `hci_*` (`include/hcinfc/`); the original `pn7160_*` spelling
+remains as a thin compatibility layer. See
+[`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md) for the full feature matrix and
+[`../doc/PN7160_libgpiod2_library_design.md`](../doc/PN7160_libgpiod2_library_design.md)
+for the layering rationale.
 
 ## Layout
 
 ```
-include/pn7160/   public API (pn7160.h, pn7160_config.h, ndef.h, desfire.h)
+include/hcinfc/   generic public API: hcinfc.h, config.h, ndef.h, crc.h, sdm.h
+include/pn7160/   compatibility shim (pn7160.h, desfire.h, …) over hcinfc/
 src/gpio.{c,h}    layer 1: libgpiod v2 — the ONLY file that includes <gpiod.h>
 src/i2c.{c,h}     layer 1: /dev/i2c-N byte pipe
 src/transport.{c,h} layer 2: NCI framing + VEN/DWL reset choreography
-src/nci.{c,h}     layer 3: CORE_RESET→INIT→DISCOVER + ISO-DEP transceive (pure)
+src/nci.{c,h}     layer 3: bring-up, discovery (tech-mask, multi-tag), transceive
+src/chipset.{c,h} chipset registry; src/chips/pn7160.c is the first driver
+src/device.c      generic hci_dev core + pn7160_* compatibility wrappers
 src/apdu.h        the apdu_fn seam the card layers depend on
 src/t4t.{c,h}     Type 4 Tag NDEF read (ISO 7816, pure)
-src/ndef.c        NDEF message parse (Text/URI)
-src/desfire.{c,h} DESFire commands wrapped as APDUs (pure)
+src/ndef.c, ndef_build.c  NDEF parse (multi-record/MIME/External/Sp/chunk) + encode
+src/crc.c         CRC-A/B/15693/FeliCa + ATS/ATQB parsing
 src/crypto.{c,h}  AES-128 ECB/CBC/CMAC + CRC32 via OpenSSL (libcrypto)
-src/desfire_ev2.{c,h} EV2 secure messaging: AuthenticateEV2First, session
-                  keys, per-command IV/CmdCtr, MAC + enciphered modes (pure)
-src/pn7160.c      façade tying config → transport → nci, + card-layer bridges
-apps/             nfc-detect, nfc-read-ndef, desfire-info, desfire-auth, desfire-manage
-tests/            test_nci, test_cards, test_crypto (RFC 4493 / FIPS-197 /
-                  SP800-38A known-answer vectors) — all run with zero hardware
+src/desfire*.c    DESFire plain + EV2 secure messaging + EV3 value/record/txn
+src/sdm.c         NTAG 424 DNA SDM / SUN verifier (AN12196)
+apps/             nfc-detect, nfc-poll, nfc-read-ndef, ntag424-sdm, desfire-*
+tests/            test_nci, test_cards, test_crypto, test_crc, test_ndef, test_sdm
+                  — all run with zero hardware
 ```
 
 Dependency arrows point down only. libgpiod is quarantined to `gpio.c`; the NCI
-logic depends only on a `pn7160_transport` vtable; the card layers (T4T, DESFire)
-depend only on an `apdu_fn` callback. So every layer is unit-tested against a
-mock with no hardware. See [`../doc/PN7160_desfire_roadmap.md`](../doc/PN7160_desfire_roadmap.md)
-for the card-stack design and the path to full DESFire EV3 secure messaging.
+logic depends only on a `pn7160_transport` vtable; the card layers (T4T, DESFire,
+SDM) depend only on an `apdu_fn` callback or are pure functions. Every layer is
+unit-tested against a mock with no hardware.
+
+**Threading:** an `hci_dev` handle is single-threaded — serialise calls on one
+handle, or give each thread its own. `hci_abort()` is the one call safe to invoke
+from another thread to interrupt a blocked poll/transceive.
 
 ## Build
 

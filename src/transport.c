@@ -49,17 +49,39 @@ static int t_reset(void *ctx, bool fw_download)
     return 0;
 }
 
+/* Drain one pending NCI packet (header + payload) and discard it. Used to
+ * clear the half-duplex bus when the NFCC holds it to send while we want to
+ * write. Returns the packet length, or <=0 if nothing was read. */
+static int drain_pending(transport_impl *t)
+{
+    uint8_t buf[NCI_HEADER_LEN + 255];
+    int n = pn7160_i2c_read(t->i2c, buf, NCI_HEADER_LEN);
+    if (n != NCI_HEADER_LEN) return n;
+    size_t payload = buf[NCI_LEN_OFFSET];
+    if (payload) pn7160_i2c_read(t->i2c, buf + NCI_HEADER_LEN, payload);
+    pn7160_log_hex("DRAIN", buf, NCI_HEADER_LEN + payload);
+    return (int)(NCI_HEADER_LEN + payload);
+}
+
 /* ---- vtable: write ----------------------------------------------- */
 static int t_write(void *ctx, const uint8_t *buf, size_t len)
 {
     transport_impl *t = ctx;
     pn7160_log_hex("SEND", buf, len);
-    int n = pn7160_i2c_write(t->i2c, buf, len);
-    if (n != (int)len) {
-        LOGE("transport: short write %d/%zu", n, len);
-        return -1;
+
+    /* The PN7160 I2C bus is half-duplex: while the NFCC has a packet to send
+     * (IRQ asserted) it NAKs host writes. If a write fails, drain a pending
+     * packet (when IRQ is high) or briefly back off, then retry. */
+    for (int attempt = 0; attempt < 6; attempt++) {
+        int n = pn7160_i2c_write(t->i2c, buf, len);
+        if (n == (int)len) return n;
+        if (pn7160_gpio_read_irq(t->gpio) == 1)
+            drain_pending(t);
+        else
+            msleep(2);
     }
-    return n;
+    LOGE("transport: write to NFCC failed (bus busy)");
+    return -1;
 }
 
 /* ---- vtable: read ------------------------------------------------ */
@@ -70,6 +92,7 @@ static int t_read(void *ctx, uint8_t *buf, size_t cap, int timeout_ms)
 
     int irq = pn7160_gpio_wait_irq(t->gpio, timeout_ms);
     if (irq == 0) return 0;            /* timeout: no data pending */
+    if (irq == PN7160_GPIO_ABORTED) return PN7160_TRANSPORT_ABORTED;
     if (irq < 0)  return -1;
 
     /* Header: MT/PBF/GID, OID, payload length. */
@@ -97,6 +120,13 @@ static int t_read(void *ctx, uint8_t *buf, size_t cap, int timeout_ms)
     return (int)(NCI_HEADER_LEN + payload);
 }
 
+/* ---- vtable: abort ----------------------------------------------- */
+static void t_abort(void *ctx)
+{
+    transport_impl *t = ctx;
+    pn7160_gpio_abort(t->gpio);
+}
+
 /* ---- lifecycle --------------------------------------------------- */
 pn7160_transport *pn7160_transport_open(const pn7160_config *cfg)
 {
@@ -121,6 +151,7 @@ pn7160_transport *pn7160_transport_open(const pn7160_config *cfg)
     t->base.write = t_write;
     t->base.read  = t_read;
     t->base.reset = t_reset;
+    t->base.abort = t_abort;
     return &t->base;
 fail:
     pn7160_transport_close(&t->base);
