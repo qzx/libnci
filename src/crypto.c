@@ -58,6 +58,22 @@ out:
     return rc;
 }
 
+int crypto_aes_ecb_decrypt(const uint8_t key[AES_KEY_LEN],
+                           const uint8_t in[AES_BLOCK], uint8_t out[AES_BLOCK])
+{
+    EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
+    if (!c) return -1;
+    int rc = -1, outl = 0, fin = 0;
+    if (EVP_DecryptInit_ex(c, EVP_aes_128_ecb(), NULL, key, NULL) != 1) goto out;
+    EVP_CIPHER_CTX_set_padding(c, 0);
+    if (EVP_DecryptUpdate(c, out, &outl, in, AES_BLOCK) != 1) goto out;
+    if (EVP_DecryptFinal_ex(c, out + outl, &fin) != 1) goto out;
+    rc = 0;
+out:
+    EVP_CIPHER_CTX_free(c);
+    return rc;
+}
+
 int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
                     const uint8_t *data, size_t len, uint8_t out[AES_BLOCK])
 {

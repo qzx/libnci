@@ -24,8 +24,10 @@ int crypto_aes_cbc_encrypt(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_
 int crypto_aes_cbc_decrypt(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_BLOCK],
                            const uint8_t *in, size_t len, uint8_t *out);
 
-/* AES-128-ECB single block (used to derive per-command IVs). */
+/* AES-128-ECB single block (used to derive per-command IVs and for LRP). */
 int crypto_aes_ecb_encrypt(const uint8_t key[AES_KEY_LEN],
+                           const uint8_t in[AES_BLOCK], uint8_t out[AES_BLOCK]);
+int crypto_aes_ecb_decrypt(const uint8_t key[AES_KEY_LEN],
                            const uint8_t in[AES_BLOCK], uint8_t out[AES_BLOCK]);
 
 /* AES-128-CMAC (RFC 4493). Full 16-byte tag. */

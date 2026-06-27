@@ -98,6 +98,13 @@ int pn7160_desfire_authenticate_legacy(pn7160 *p, uint8_t key_no,
 int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
                                     const uint8_t *key, size_t key_len);
 
+/* AuthenticateLRPFirst for a tag in LRP mode (impl.txt #74/#103). Establishes
+ * an LRP secure-messaging session with the 16-byte key of `key_no`. Enable LRP
+ * first with pn7160_desfire_set_configuration(p, 0x05, {0,0,0,0,0x02,0,0,0,0,0},
+ * 10) - this is PERMANENT and cannot be undone. */
+int pn7160_desfire_authenticate_lrp(pn7160 *p, uint8_t key_no, const uint8_t key[16]);
+bool pn7160_desfire_lrp_active(pn7160 *p);
+
 /* Recommended authentication entry point. Establishes a usable secure session
  * for subsequent metadata/file operations. Today this performs
  * AuthenticateEV2First (AES), the method used by DESFire EV2/EV3 and NTAG 424

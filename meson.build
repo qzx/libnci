@@ -18,7 +18,7 @@ hcinfc_sources = [
   'src/nci.c', 'src/chipset.c', 'src/chips/pn7160.c', 'src/device.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
-  'src/crypto.c', 'src/crc.c', 'src/sdm.c',
+  'src/desfire_lrp.c', 'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c',
 ]
 
 hcinfc_lib = static_library('hcinfc',
@@ -76,6 +76,13 @@ test_crypto = executable('test_crypto',
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('crypto', test_crypto)
+
+# LRP primitive vs the NXP AN12304 test vectors (docs/LRP.txt)
+test_lrp = executable('test_lrp',
+  ['tests/test_lrp.c', 'src/lrp.c', 'src/crypto.c'],
+  include_directories: inc_all,
+  dependencies: [libcrypto])
+test('lrp', test_lrp)
 
 # CRC + protocol utilities (CRC-A/B, ISO15693, FeliCa, ATS/ATQB parsing)
 test_crc = executable('test_crc',

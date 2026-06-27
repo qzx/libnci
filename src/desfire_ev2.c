@@ -282,6 +282,13 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     s->cmd_ctr++;
     ctr_lo = (uint8_t)(s->cmd_ctr & 0xFF);
     ctr_hi = (uint8_t)((s->cmd_ctr >> 8) & 0xFF);
+    if (rn == 0) {
+        /* Status-only ACK with no response MAC (e.g. SetConfiguration): the
+         * command was MAC-protected and the card accepted it; CmdCtr already
+         * advanced above, keeping the session in sync. */
+        if (out_len) *out_len = 0;
+        return PN7160_OK;
+    }
     if (rn < 8) { LOGE("ev2: response missing MAC"); return PN7160_ERR; }
     size_t enc_resp_len = rn - 8;
     const uint8_t *resp_mac = resp + enc_resp_len;

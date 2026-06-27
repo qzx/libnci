@@ -189,14 +189,20 @@ byte-for-byte intact.
 | 67 | ISOUpdateBinary | ✅hw | `pn7160_desfire_iso_update_binary` (00 D6); the path `ntag424-provision` uses to write the NDEF file |
 | 68 | ChangeFileSettings (+SDM) | ✅hw | `pn7160_desfire_change_file_settings`, `hci_sdm_encode_settings`; SDM enabled on a real tag |
 | 69 | ReadCounter (SDM) | ✅hw | `pn7160_desfire_get_file_counters` (native 0xF6, CommMode.Full) - secure exchange validated live (card returns a valid status); counter value also recovered via the SUN PICCData (seen incrementing) |
-| 70 | SetConfiguration | 🟢 | `pn7160_desfire_set_configuration` (0x5C, CommMode.Full) via the validated EV2 transact path. **Deliberately not executed on the live tag**: its options (Random ID, LRP enable, ...) are one-way |
+| 70 | SetConfiguration | ✅hw | `pn7160_desfire_set_configuration` (0x5C, CommMode.Full); executed live to switch a tag to LRP mode (option 0x05). Its response is status-only (no MAC) - handled |
 | 71 | **SDM SUN decode** | ✅hw | `hci_sdm_decrypt_picc`, `hci_sdm_verify`; real tag UID recovered |
 | 72 | **SDM CMAC verify** | ✅hw | `hci_sdm_mac` truncated-CMAC; VALID on live taps |
 | 73 | **SDM EncFileData decrypt** | ✅ | `hci_sdm_decrypt_file_data` (test_sdm; not exercised by this tag's config) |
-| 74 | LRP mode auth | ⬜ | Deferred. The LRP primitive is specified in NXP AN12304 (not in-repo) and **LRP mode is a one-way SetConfiguration switch**, so it can be neither vector-verified nor hardware-validated here. Not shipping unverified crypto - needs AN12304 + its test vectors |
+| 74 | LRP mode auth | ✅hw | full LRP stack in `src/lrp.c` (AN12304: genkeys, evalLRP, LRP-CMAC, LRICB) + `src/desfire_lrp.c` (AuthenticateLRPFirst). Crypto validated against the AN12304 KATs (`test_lrp`); auth validated on a tag switched to LRP mode |
 
 `ntag424-sdm` CLI verifies a scanned SUN URL offline (UID + counter + MAC + enc data).
-#63-73 are complete; #74 (LRP) is the sole deferred item for the reasons above.
+#63-74 are complete. LRP: `src/lrp.c` is unit-tested against every AN12304 test
+vector (secret plaintexts/updated keys, ~8 evalLRP, 6 LRP-CMAC, 4 LRICB); on a
+sacrificial tag, SetConfiguration(0x05) switched it to LRP mode (AES auth then
+refused) and AuthenticateLRPFirst established a session - proving the primitive,
+CMAC, session-key derivation and LRICB response decryption against real silicon.
+Remaining LRP work: the command-layer secure messaging (MAC/Full reads & writes
+under an LRP session) on top of the validated session keys.
 
 ## 9. DESFire EV3
 | # | Feature | Status | Where |
@@ -222,8 +228,8 @@ byte-for-byte intact.
 | 99 | Read TransactionMAC file | ✅hw | `pn7160_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
 | 100 | Proximity Check | ⬜ | needs NFCC RF-timing support (timed PC frames); not exposed by the PN7160 data path at this layer; deferred |
 | 101 | Delegated App Mgmt | ⬜ | issuer-delegated provisioning with encrypted DAM key; deferred (complex, needs issuer DAM keys to validate) |
-| 102 | SetConfiguration ext | 🟢 | `pn7160_desfire_set_configuration` (0x5C, Full) - same command as NTAG #70; not executed live (one-way options) |
-| 103 | LRP mode | ⬜ | deferred - LRP primitive is in AN12304 (not in-repo) and the mode switch is irreversible; same as NTAG #74 |
+| 102 | SetConfiguration ext | ✅hw | `pn7160_desfire_set_configuration` (0x5C, Full); same command as NTAG #70, executed live |
+| 103 | LRP mode | ✅hw | shared LRP implementation (`src/lrp.c`, `src/desfire_lrp.c`); crypto vector-validated and AuthenticateLRPFirst validated on a real tag in LRP mode (see NTAG #74) |
 
 The TMAC suite (#97-99) is the EV3 differentiator and is validated live: a
 TransactionMAC file makes the card emit a MAC over every committed transaction;
@@ -231,8 +237,8 @@ CommitReaderID binds a reader identity. The EV3 commands reuse the already-teste
 `desfire_ev2_transact` for MAC/full comm; only the command-data byte layouts are
 new. Legacy/ISO 3DES auth (#77/#78) and native AF response chaining (#79) are
 now done and validated on hardware (DES/3DES via `crypto_3des_cbc`, handshakes in
-`src/desfire_legacy.c`). Still deferred: #100 (RF-timed proximity, needs NFCC
-support), #101 (DAM), #103 (LRP - AN12304 + irreversible).
+`src/desfire_legacy.c`). LRP mode (#103) is now done too - shared with NTAG #74.
+Still deferred: #100 (RF-timed proximity, needs NFCC support), #101 (DAM).
 
 ## 10. NFC-DEP / P2P  · 11. HCE
 | # | Feature | Status |
