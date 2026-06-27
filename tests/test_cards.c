@@ -10,7 +10,7 @@
 #include "crypto.h"
 #include "desfire.h"
 #include "desfire_ev3.h"
-#include "pn7160/ndef.h"
+#include "nci/ndef.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -70,7 +70,7 @@ static int t4t_mock(void *ctx, const uint8_t *tx, size_t tx_len,
 static void test_t4t_ndef_read(void)
 {
     uint8_t out[256]; size_t n = 0;
-    assert(t4t_read_ndef(t4t_mock, NULL, out, sizeof out, &n) == PN7160_OK);
+    assert(t4t_read_ndef(t4t_mock, NULL, out, sizeof out, &n) == NCI_OK);
     assert(n == sizeof NDEF_MSG);
     assert(memcmp(out, NDEF_MSG, n) == 0);
     printf("  t4t_ndef_read: OK (%zu bytes)\n", n);
@@ -128,14 +128,14 @@ static void test_desfire_get_version(void)
                                   0xC1,0xC2,0xC3,0xC4,0xC5, 0x18,0x20, 0x91,0x00 };
     fifo f = { { v1, v2, v3 }, { sizeof v1, sizeof v2, sizeof v3 }, 3, 0 };
 
-    pn7160_desfire_version ver;
-    assert(desfire_get_version(df_mock, &f, &ver) == PN7160_OK);
+    nci_desfire_version ver;
+    assert(desfire_get_version(df_mock, &f, &ver) == NCI_OK);
     assert(ver.hw_vendor == 0x04 && ver.hw_type == 0x01);
     assert(ver.sw_major == 0x30);          /* EV3 */
     static const uint8_t uid[7] = { 0x04,0x9B,0x1C,0xD2,0xE3,0xF4,0x80 };
     assert(memcmp(ver.uid, uid, 7) == 0);
-    assert(strcmp(pn7160_desfire_product(&ver), "DESFire EV3") == 0);
-    printf("  desfire_get_version: OK (%s)\n", pn7160_desfire_product(&ver));
+    assert(strcmp(nci_desfire_product(&ver), "DESFire EV3") == 0);
+    printf("  desfire_get_version: OK (%s)\n", nci_desfire_product(&ver));
 }
 
 static void test_desfire_apps_and_files(void)
@@ -147,13 +147,13 @@ static void test_desfire_apps_and_files(void)
                { sizeof apps, sizeof sel_ok, sizeof files }, 3, 0 };
 
     uint32_t aids[8]; size_t na = 0;
-    assert(desfire_get_application_ids(df_mock, &f, aids, 8, &na) == PN7160_OK);
+    assert(desfire_get_application_ids(df_mock, &f, aids, 8, &na) == NCI_OK);
     assert(na == 1 && aids[0] == 0xA1A2A3);
 
-    assert(desfire_select_application(df_mock, &f, aids[0]) == PN7160_OK);
+    assert(desfire_select_application(df_mock, &f, aids[0]) == NCI_OK);
 
     uint8_t fids[8]; size_t nf = 0;
-    assert(desfire_get_file_ids(df_mock, &f, fids, 8, &nf) == PN7160_OK);
+    assert(desfire_get_file_ids(df_mock, &f, fids, 8, &nf) == NCI_OK);
     assert(nf == 3 && fids[0] == 1 && fids[2] == 3);
     printf("  desfire_apps_and_files: OK (AID %06X, %zu files)\n", aids[0], nf);
 }
@@ -164,7 +164,7 @@ static void test_desfire_error_status(void)
     fifo f = { { auth_err }, { sizeof auth_err }, 1, 0 };
     uint8_t out[32]; size_t n = 0;
     assert(desfire_read_data_plain(df_mock, &f, 0x02, 0, 0, out, sizeof out, &n)
-           == PN7160_ERR);
+           == NCI_ERR);
     printf("  desfire_error_status: OK (0x91AE rejected)\n");
 }
 
@@ -236,16 +236,16 @@ static void test_mifare(void)
 {
     /* auth Key A, default key */
     static const uint8_t key[6] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
-    assert(mfc_auth(mfc_mock, NULL, 4, MFC_KEY_A, key) == PN7160_OK);
+    assert(mfc_auth(mfc_mock, NULL, 4, MFC_KEY_A, key) == NCI_OK);
     /* read block -> the canned 0xB0.. pattern */
     uint8_t blk[16];
-    assert(mfc_read(mfc_mock, NULL, 4, blk) == PN7160_OK);
+    assert(mfc_read(mfc_mock, NULL, 4, blk) == NCI_OK);
     assert(blk[0] == 0xB0 && blk[15] == 0xBF);
     /* write block (single packet: 10 A0 <block> <16 data>) */
     uint8_t data[16] = {0};
-    assert(mfc_write(mfc_mock, NULL, 4, data) == PN7160_OK);
+    assert(mfc_write(mfc_mock, NULL, 4, data) == NCI_OK);
     /* value command (single packet: 10 C1 <block> <4B operand>) */
-    assert(mfc_value_cmd(mfc_mock, NULL, MFC_CMD_INC, 5, 50) == PN7160_OK);
+    assert(mfc_value_cmd(mfc_mock, NULL, MFC_CMD_INC, 5, 50) == NCI_OK);
 
     /* value-block encode/decode round-trip */
     uint8_t vb[16];
@@ -253,10 +253,10 @@ static void test_mifare(void)
     assert(vb[0] == (uint8_t)~vb[4] && vb[0] == vb[8]);   /* format invariants */
     assert(vb[12] == 0x05 && vb[13] == (uint8_t)~0x05);
     int32_t v = 0;
-    assert(mfc_value_decode(vb, &v) == PN7160_OK && v == -12345);
+    assert(mfc_value_decode(vb, &v) == NCI_OK && v == -12345);
     /* a corrupted value block is rejected */
     vb[4] ^= 0xFF;
-    assert(mfc_value_decode(vb, &v) != PN7160_OK);
+    assert(mfc_value_decode(vb, &v) != NCI_OK);
     printf("  mifare: OK (auth/read/write framing, value block)\n");
 }
 
@@ -287,7 +287,7 @@ static void test_mfc_ndef(void)
     static const uint8_t msg[] = {
         0xD1, 0x01, 0x0B, 0x55, 0x04, 'q','z','x','.','i','s','/','h','i',
     };
-    assert(mfc_ndef_write(ram_io, NULL, msg, sizeof msg) == PN7160_OK);
+    assert(mfc_ndef_write(ram_io, NULL, msg, sizeof msg) == NCI_OK);
     /* MAD entry for sector 1 must read as NDEF (03 E1 at block1[2..3]). */
     assert(mfc_ram[1][2] == 0x03 && mfc_ram[1][3] == 0xE1);
     /* MAD CRC byte must match a recompute over block1[1..15] + block2[0..15]. */
@@ -299,12 +299,12 @@ static void test_mfc_ndef(void)
     assert(mfc_ram[4][0] == 0x03 && mfc_ram[4][1] == sizeof msg);
 
     uint8_t out[256]; size_t olen = 0;
-    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == PN7160_OK);
+    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == NCI_OK);
     assert(olen == sizeof msg && memcmp(out, msg, olen) == 0);
 
     /* format -> empty NDEF reads back as zero length */
-    assert(mfc_ndef_write(ram_io, NULL, NULL, 0) == PN7160_OK);
-    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == PN7160_OK && olen == 0);
+    assert(mfc_ndef_write(ram_io, NULL, NULL, 0) == NCI_OK);
+    assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == NCI_OK && olen == 0);
     printf("  mfc_ndef: OK (MAD CRC, write/read round trip, format)\n");
 }
 

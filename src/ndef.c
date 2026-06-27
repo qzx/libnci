@@ -11,7 +11,7 @@
  *   id(id_len) - only if IL
  *   payload(payload_len)
  */
-#include "hcinfc/ndef.h"
+#include "nci/ndef.h"
 #include <string.h>
 
 #define F_MB 0x80

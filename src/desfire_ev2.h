@@ -14,12 +14,12 @@
  * Spec: NXP AN12196 / NT4H2421Gx (NTAG 424 DNA). Same machinery serves
  * DESFire EV2/EV3.
  */
-#ifndef PN7160_DESFIRE_EV2_H
-#define PN7160_DESFIRE_EV2_H
+#ifndef NCI_DESFIRE_EV2_H
+#define NCI_DESFIRE_EV2_H
 
 #include <stdbool.h>
 #include "apdu.h"
-#include "pn7160/pn7160.h"   /* PN7160_OK / PN7160_ERR */
+#include "nci/nci.h"   /* NCI_OK / NCI_ERR */
 
 typedef struct {
     bool     active;
@@ -147,5 +147,5 @@ int desfire_ev2_get_file_counters(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 int desfire_ev2_set_configuration(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                   uint8_t option, const uint8_t *data, size_t data_len);
 
-#endif /* PN7160_DESFIRE_EV2_H */
+#endif /* NCI_DESFIRE_EV2_H */
 

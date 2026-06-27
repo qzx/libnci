@@ -6,7 +6,7 @@
  *   CRC-A    0xBF05   CRC-B 0x906E   ISO15693 0x906E   FeliCa(XMODEM) 0x31C3
  * (see tests/test_crc.c).
  */
-#include "hcinfc/crc.h"
+#include "nci/crc.h"
 
 /* FSCI -> FSC (bytes), shared by ATS and ATQB (ISO 14443-4 table). */
 static const uint16_t FSCI_TO_FSC[16] = {
@@ -25,23 +25,23 @@ static uint16_t crc_reflected(uint16_t crc, const uint8_t *data, size_t len)
     return crc;
 }
 
-uint16_t hci_crc_a(const uint8_t *data, size_t len)
+uint16_t nci_crc_a(const uint8_t *data, size_t len)
 {
     return crc_reflected(0x6363, data, len);
 }
 
-uint16_t hci_crc_b(const uint8_t *data, size_t len)
+uint16_t nci_crc_b(const uint8_t *data, size_t len)
 {
     return (uint16_t)(crc_reflected(0xFFFF, data, len) ^ 0xFFFF);
 }
 
-uint16_t hci_crc_15693(const uint8_t *data, size_t len)
+uint16_t nci_crc_15693(const uint8_t *data, size_t len)
 {
-    return hci_crc_b(data, len);   /* identical algorithm (CRC-16/X-25) */
+    return nci_crc_b(data, len);   /* identical algorithm (CRC-16/X-25) */
 }
 
 /* FeliCa: poly 0x1021, init 0x0000, MSB-first, no final xor (CRC-16/XMODEM). */
-uint16_t hci_crc_felica(const uint8_t *data, size_t len)
+uint16_t nci_crc_felica(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0x0000;
     for (size_t i = 0; i < len; i++) {
@@ -59,31 +59,31 @@ static void append_le(uint8_t *data, size_t len, uint16_t crc, size_t *out_len)
     if (out_len) *out_len = len + 2;
 }
 
-void hci_crc_a_append(uint8_t *data, size_t len, size_t *out_len)
+void nci_crc_a_append(uint8_t *data, size_t len, size_t *out_len)
 {
-    append_le(data, len, hci_crc_a(data, len), out_len);
+    append_le(data, len, nci_crc_a(data, len), out_len);
 }
 
-void hci_crc_b_append(uint8_t *data, size_t len, size_t *out_len)
+void nci_crc_b_append(uint8_t *data, size_t len, size_t *out_len)
 {
-    append_le(data, len, hci_crc_b(data, len), out_len);
+    append_le(data, len, nci_crc_b(data, len), out_len);
 }
 
-void hci_crc_15693_append(uint8_t *data, size_t len, size_t *out_len)
+void nci_crc_15693_append(uint8_t *data, size_t len, size_t *out_len)
 {
-    append_le(data, len, hci_crc_15693(data, len), out_len);
+    append_le(data, len, nci_crc_15693(data, len), out_len);
 }
 
-void hci_crc_felica_append(uint8_t *data, size_t len, size_t *out_len)
+void nci_crc_felica_append(uint8_t *data, size_t len, size_t *out_len)
 {
-    uint16_t crc = hci_crc_felica(data, len);
+    uint16_t crc = nci_crc_felica(data, len);
     data[len]     = (uint8_t)(crc >> 8);     /* MSB first */
     data[len + 1] = (uint8_t)(crc & 0xFF);
     if (out_len) *out_len = len + 2;
 }
 
 /* ---- ATS parsing ------------------------------------------------------ */
-int hci_parse_ats(const uint8_t *ats, size_t len, hci_ats_info *out)
+int nci_parse_ats(const uint8_t *ats, size_t len, nci_ats_info *out)
 {
     if (!ats || !out || len < 1) return -1;
     uint8_t tl = ats[0];
@@ -126,7 +126,7 @@ int hci_parse_ats(const uint8_t *ats, size_t len, hci_ats_info *out)
 }
 
 /* ---- ATQB / SENSB_RES parsing ----------------------------------------- */
-int hci_parse_atqb(const uint8_t *sensb, size_t len, hci_atqb_info *out)
+int nci_parse_atqb(const uint8_t *sensb, size_t len, nci_atqb_info *out)
 {
     if (!sensb || !out) return -1;
     /* Skip an optional leading 0x50 tag byte. */

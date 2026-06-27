@@ -7,8 +7,8 @@
  *
  * All functions return 0 on success, <0 on error. Buffers are caller-owned.
  */
-#ifndef PN7160_CRYPTO_H
-#define PN7160_CRYPTO_H
+#ifndef NCI_CRYPTO_H
+#define NCI_CRYPTO_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -52,4 +52,4 @@ uint32_t crypto_crc32_desfire(const uint8_t *data, size_t len);
 /* Cryptographically secure random bytes. */
 int crypto_random(uint8_t *buf, size_t len);
 
-#endif /* PN7160_CRYPTO_H */
+#endif /* NCI_CRYPTO_H */

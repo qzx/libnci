@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* mfc_ndef.c - NDEF on MIFARE Classic via the MAD (see mfc_ndef.h). */
 #include "mfc_ndef.h"
-#include "pn7160/pn7160.h"
+#include "nci/nci.h"
 #include "log.h"
 #include <string.h>
 
@@ -44,11 +44,11 @@ static void mad_entry_loc(uint8_t sector, int *block, int *off)
 int mfc_ndef_read(mfc_block_io io, void *ctx,
                   uint8_t *out, size_t cap, size_t *out_len)
 {
-    if (!io || !out) return PN7160_ERR;
+    if (!io || !out) return NCI_ERR;
     uint8_t b1[16], b2[16];
     if (io(ctx, 1, b1, 0) < 0 || io(ctx, 2, b2, 0) < 0) {
         LOGE("mfc-ndef: cannot read MAD");
-        return PN7160_ERR;
+        return NCI_ERR;
     }
 
     /* Gather raw bytes from every NDEF sector, in sector order. */
@@ -61,12 +61,12 @@ int mfc_ndef_read(mfc_block_io io, void *ctx,
         if (!aid_is_ndef(mb[off], mb[off + 1])) continue;
         for (uint8_t i = 0; i < 3; i++) {
             uint8_t d[16];
-            if (io(ctx, (uint8_t)(sec_block(s) + i), d, 0) < 0) return PN7160_ERR;
+            if (io(ctx, (uint8_t)(sec_block(s) + i), d, 0) < 0) return NCI_ERR;
             memcpy(raw + rawn, d, 16);
             rawn += 16;
         }
     }
-    if (rawn == 0) { LOGE("mfc-ndef: no NDEF sectors in MAD"); return PN7160_ERR; }
+    if (rawn == 0) { LOGE("mfc-ndef: no NDEF sectors in MAD"); return NCI_ERR; }
 
     /* Walk the TLV stream: 0x00 = NULL (skip), 0x03 = NDEF, 0xFE = end. */
     size_t i = 0;
@@ -83,21 +83,21 @@ int mfc_ndef_read(mfc_block_io io, void *ctx,
         }
         if (t == 0x03) {
             if (i + len > rawn) len = rawn - i;
-            if (len > cap) return PN7160_ERR;
+            if (len > cap) return NCI_ERR;
             memcpy(out, raw + i, len);
             if (out_len) *out_len = len;
-            return PN7160_OK;
+            return NCI_OK;
         }
         i += len;                               /* skip other TLVs */
     }
     if (out_len) *out_len = 0;                   /* empty NDEF */
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* ---- write --------------------------------------------------------- */
 int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len)
 {
-    if (!io) return PN7160_ERR;
+    if (!io) return NCI_ERR;
 
     /* Build the TLV stream: [03 len value] [FE], 1- or 3-byte length. */
     static uint8_t raw[DATA_SECTORS * SECTOR_DATA];
@@ -110,13 +110,13 @@ int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len)
         raw[n++] = (uint8_t)(len >> 8);
         raw[n++] = (uint8_t)(len & 0xFF);
     }
-    if (msg && len) { if (n + len > sizeof raw) return PN7160_ERR; memcpy(raw + n, msg, len); n += len; }
-    if (n + 1 > sizeof raw) return PN7160_ERR;
+    if (msg && len) { if (n + len > sizeof raw) return NCI_ERR; memcpy(raw + n, msg, len); n += len; }
+    if (n + 1 > sizeof raw) return NCI_ERR;
     raw[n++] = 0xFE;                              /* terminator */
 
     uint8_t nsec = (uint8_t)((n + SECTOR_DATA - 1) / SECTOR_DATA);
     if (nsec == 0) nsec = 1;
-    if (nsec > DATA_SECTORS) { LOGE("mfc-ndef: message too large (%zu B)", len); return PN7160_ERR; }
+    if (nsec > DATA_SECTORS) { LOGE("mfc-ndef: message too large (%zu B)", len); return NCI_ERR; }
 
     /* Pad the last sector with zeroes (NULL TLVs). */
     size_t padded = (size_t)nsec * SECTOR_DATA;
@@ -128,7 +128,7 @@ int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len)
             uint8_t *src = raw + (size_t)(s - 1) * SECTOR_DATA + i * 16;
             if (io(ctx, (uint8_t)(sec_block(s) + i), src, 1) < 0) {
                 LOGE("mfc-ndef: write sector %u failed", s);
-                return PN7160_ERR;
+                return NCI_ERR;
             }
         }
     }
@@ -136,7 +136,7 @@ int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len)
     /* Update the MAD (sector 0 blocks 1,2): mark sectors 1..nsec as NDEF, set
      * Info byte 0, recompute CRC over the 31 trailing bytes. */
     uint8_t b1[16], b2[16];
-    if (io(ctx, 1, b1, 0) < 0 || io(ctx, 2, b2, 0) < 0) return PN7160_ERR;
+    if (io(ctx, 1, b1, 0) < 0 || io(ctx, 2, b2, 0) < 0) return NCI_ERR;
     b1[1] = 0x00;                                /* Info: no publisher sector */
     for (uint8_t s = 1; s <= DATA_SECTORS; s++) {
         int blk, off; mad_entry_loc(s, &blk, &off);
@@ -149,7 +149,7 @@ int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len)
     b1[0] = mfc_mad_crc8(crcbuf, sizeof crcbuf);
     if (io(ctx, 1, b1, 1) < 0 || io(ctx, 2, b2, 1) < 0) {
         LOGE("mfc-ndef: MAD update failed");
-        return PN7160_ERR;
+        return NCI_ERR;
     }
-    return PN7160_OK;
+    return NCI_OK;
 }

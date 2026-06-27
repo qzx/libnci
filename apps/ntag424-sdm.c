@@ -13,7 +13,7 @@
  * range is, per the common SDM layout, the ASCII of the enc parameter (or empty
  * when only PICCData is mirrored).
  */
-#include "hcinfc/sdm.h"
+#include "nci/sdm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +21,7 @@
 
 static int key_arg(const char *hex, uint8_t key[16])
 {
-    return hci_hex2bin(hex, key, 16) == 16 ? 0 : -1;
+    return nci_hex2bin(hex, key, 16) == 16 ? 0 : -1;
 }
 
 static void usage(const char *a0)
@@ -59,33 +59,33 @@ int main(int argc, char **argv)
     if (!url) { usage(argv[0]); return 2; }
 
     char picc_hex[64], enc_hex[256], cmac_hex[64];
-    if (hci_url_param(url, picc_name, picc_hex, sizeof picc_hex) < 0) {
+    if (nci_url_param(url, picc_name, picc_hex, sizeof picc_hex) < 0) {
         fprintf(stderr, "no '%s' parameter in URL\n", picc_name);
         return 1;
     }
-    if (hci_url_param(url, cmac_name, cmac_hex, sizeof cmac_hex) < 0) {
+    if (nci_url_param(url, cmac_name, cmac_hex, sizeof cmac_hex) < 0) {
         fprintf(stderr, "no '%s' parameter in URL\n", cmac_name);
         return 1;
     }
-    int has_enc = hci_url_param(url, enc_name, enc_hex, sizeof enc_hex) >= 0;
+    int has_enc = nci_url_param(url, enc_name, enc_hex, sizeof enc_hex) >= 0;
 
     uint8_t enc_picc[16], cmac[8], enc_file[256];
-    if (hci_hex2bin(picc_hex, enc_picc, sizeof enc_picc) != 16) {
+    if (nci_hex2bin(picc_hex, enc_picc, sizeof enc_picc) != 16) {
         fprintf(stderr, "picc_data must be 32 hex chars\n");
         return 1;
     }
-    if (hci_hex2bin(cmac_hex, cmac, sizeof cmac) != 8) {
+    if (nci_hex2bin(cmac_hex, cmac, sizeof cmac) != 8) {
         fprintf(stderr, "cmac must be 16 hex chars\n");
         return 1;
     }
-    int enc_len = has_enc ? hci_hex2bin(enc_hex, enc_file, sizeof enc_file) : 0;
+    int enc_len = has_enc ? nci_hex2bin(enc_hex, enc_file, sizeof enc_file) : 0;
 
     /* Common SDM layout: the CMAC covers the ASCII of the enc parameter. */
     const uint8_t *mac_input = has_enc ? (const uint8_t *)enc_hex : NULL;
     size_t mac_input_len = has_enc ? strlen(enc_hex) : 0;
 
-    hci_sdm_result res;
-    int r = hci_sdm_verify(meta_key, file_key, enc_picc,
+    nci_sdm_result res;
+    int r = nci_sdm_verify(meta_key, file_key, enc_picc,
                            has_enc ? enc_file : NULL, has_enc ? (size_t)enc_len : 0,
                            mac_input, mac_input_len, cmac, &res);
 
@@ -98,7 +98,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < res.file_data_len; i++) printf("%02X", res.file_data[i]);
         printf("\n");
     }
-    if (r != HCI_OK)
-        fprintf(stderr, "verification failed: %s\n", hci_strerror(r));
-    return r == HCI_OK ? 0 : 1;
+    if (r != NCI_OK)
+        fprintf(stderr, "verification failed: %s\n", nci_strerror(r));
+    return r == NCI_OK ? 0 : 1;
 }

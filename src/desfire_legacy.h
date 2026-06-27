@@ -14,8 +14,8 @@
  * the mutual authentication itself; legacy CommMode secure messaging (CRC-16 /
  * DES-CBC payloads) is a separate layer.
  */
-#ifndef PN7160_DESFIRE_LEGACY_H
-#define PN7160_DESFIRE_LEGACY_H
+#ifndef NCI_DESFIRE_LEGACY_H
+#define NCI_DESFIRE_LEGACY_H
 
 #include "apdu.h"
 
@@ -36,4 +36,4 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
                         const uint8_t *key, size_t key_len,
                         desfire_legacy_session *s);
 
-#endif /* PN7160_DESFIRE_LEGACY_H */
+#endif /* NCI_DESFIRE_LEGACY_H */

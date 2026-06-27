@@ -17,22 +17,22 @@
  * four technologies with sane defaults and is what is validated on hardware.
  * Chipset-specific CORE_SET_CONFIG / proprietary tuning lands here without
  * touching the generic device layer. */
-static int pn7160_configure(pn7160_transport *t, const nci_device_info *info)
+static int nci_configure(nci_transport *t, const nci_dev_info *info)
 {
     (void)t;
-    LOGD("pn7160: configure (nci_ver 0x%02x) - using NCI defaults",
+    LOGD("nci: configure (nci_ver 0x%02x) - using NCI defaults",
          info ? info->nci_version : 0);
-    return HCI_OK;
+    return NCI_OK;
 }
 
-const hci_chip hci_chip_pn7160 = {
+const nci_chip nci_chip_pn7160 = {
     .info = {
         .name             = "pn7160",
         .description      = "NXP PN7160/PN7161 NCI 2.0 NFC controller",
         .default_i2c_addr = 0x28,
-        .caps             = HCI_CAP_ISO_DEP | HCI_CAP_NFC_DEP |
-                            HCI_CAP_CE | HCI_CAP_FW_UPDATE,
+        .caps             = NCI_CAP_ISO_DEP | NCI_CAP_NFC_DEP |
+                            NCI_CAP_CE | NCI_CAP_FW_UPDATE,
     },
-    .transport_open = pn7160_transport_open,
-    .configure      = pn7160_configure,
+    .transport_open = nci_transport_open,
+    .configure      = nci_configure,
 };

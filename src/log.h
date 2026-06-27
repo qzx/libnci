@@ -10,12 +10,12 @@
  *   4 NCI     + NCI control frames (SEND/RECV hex)
  *   5 BYTES   + raw I2C/SPI byte traffic
  *
- * Set via hci_set_log_level() (public API) or the environment, resolved once:
+ * Set via nci_set_log_level() (public API) or the environment, resolved once:
  *   NCI_LOG=<0..5>            explicit level
  *   NCI_DEBUG / PN7160_DEBUG  legacy boolean -> NCI level (frames)
  */
-#ifndef PN7160_LOG_H
-#define PN7160_LOG_H
+#ifndef NCI_LOG_H
+#define NCI_LOG_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,32 +23,32 @@
 #include <stdint.h>
 
 enum {
-    PN7160_LOG_SILENT = 0,
-    PN7160_LOG_ERROR  = 1,
-    PN7160_LOG_WARN   = 2,
-    PN7160_LOG_INFO   = 3,
-    PN7160_LOG_NCI    = 4,
-    PN7160_LOG_BYTES  = 5,
+    NCI_LVL_SILENT = 0,
+    NCI_LVL_ERROR  = 1,
+    NCI_LVL_WARN   = 2,
+    NCI_LVL_INFO   = 3,
+    NCI_LVL_NCI    = 4,
+    NCI_LVL_BYTES  = 5,
 };
 
 /* Current level (resolves the environment on first call). */
-int  pn7160_log_level(void);
+int  nci_log_get_level(void);
 /* Override the level programmatically (clamped to 0..5). */
-void pn7160_log_set_level(int level);
+void nci_log_set_level(int level);
 /* Hex-dump a buffer, but only if the current level >= `level`. */
-void pn7160_log_hex_at(int level, const char *tag, const uint8_t *buf, size_t len);
+void nci_log_hex_at(int level, const char *tag, const uint8_t *buf, size_t len);
 
-#define LOGE(...) do { if (pn7160_log_level() >= PN7160_LOG_ERROR) { \
+#define LOGE(...) do { if (nci_log_get_level() >= NCI_LVL_ERROR) { \
                           fprintf(stderr, "[nci][E] " __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
-#define LOGW(...) do { if (pn7160_log_level() >= PN7160_LOG_WARN) { \
+#define LOGW(...) do { if (nci_log_get_level() >= NCI_LVL_WARN) { \
                           fprintf(stderr, "[nci][W] " __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
-#define LOGD(...) do { if (pn7160_log_level() >= PN7160_LOG_INFO) { \
+#define LOGD(...) do { if (nci_log_get_level() >= NCI_LVL_INFO) { \
                           fprintf(stderr, "[nci][D] " __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
 
 /* Back-compat: the NCI-frame hex dumper (transport SEND/RECV/DRAIN). */
-static inline void pn7160_log_hex(const char *tag, const uint8_t *buf, size_t len)
+static inline void nci_log_hex(const char *tag, const uint8_t *buf, size_t len)
 {
-    pn7160_log_hex_at(PN7160_LOG_NCI, tag, buf, len);
+    nci_log_hex_at(NCI_LVL_NCI, tag, buf, len);
 }
 
-#endif /* PN7160_LOG_H */
+#endif /* NCI_LOG_H */

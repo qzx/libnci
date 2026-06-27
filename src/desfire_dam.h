@@ -19,8 +19,8 @@
  * exercised on a card personalised with known DAM keys (NXP AppXplorer service).
  * GetDelegatedInfo needs only an ordinary session and works on any card.
  */
-#ifndef PN7160_DESFIRE_DAM_H
-#define PN7160_DESFIRE_DAM_H
+#ifndef NCI_DESFIRE_DAM_H
+#define NCI_DESFIRE_DAM_H
 
 #include "apdu.h"
 #include "desfire_ev2.h"
@@ -45,4 +45,4 @@ int desfire_dam_create(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 int desfire_dam_get_info(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                          uint16_t dam_slot, uint8_t out[8]);
 
-#endif /* PN7160_DESFIRE_DAM_H */
+#endif /* NCI_DESFIRE_DAM_H */

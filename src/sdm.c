@@ -2,7 +2,7 @@
 /*
  * sdm.c - NTAG 424 DNA SDM / SUN verification (NXP AN12196 §4).
  */
-#include "hcinfc/sdm.h"
+#include "nci/sdm.h"
 #include "crypto.h"
 #include <string.h>
 
@@ -13,27 +13,27 @@ static void ctr_le3(uint32_t ctr, uint8_t out[3])
     out[2] = (uint8_t)((ctr >> 16) & 0xFF);
 }
 
-int hci_sdm_decrypt_picc(const uint8_t meta_key[16], const uint8_t enc_picc[16],
+int nci_sdm_decrypt_picc(const uint8_t meta_key[16], const uint8_t enc_picc[16],
                          uint8_t uid_out[7], uint32_t *read_ctr_out)
 {
-    if (!meta_key || !enc_picc) return HCI_E_INVAL;
+    if (!meta_key || !enc_picc) return NCI_E_INVAL;
     uint8_t zero_iv[16] = { 0 };
     uint8_t plain[16];
     if (crypto_aes_cbc_decrypt(meta_key, zero_iv, enc_picc, 16, plain) < 0)
-        return HCI_E_AUTH;
+        return NCI_E_AUTH;
     /* plain: PICCDataTag(1) || UID(7) || SDMReadCtr(3, LSB) || pad */
     if (uid_out) memcpy(uid_out, plain + 1, 7);
     if (read_ctr_out)
         *read_ctr_out = (uint32_t)plain[8] | ((uint32_t)plain[9] << 8) |
                         ((uint32_t)plain[10] << 16);
-    return HCI_OK;
+    return NCI_OK;
 }
 
-int hci_sdm_session_keys(const uint8_t file_key[16], const uint8_t uid[7],
+int nci_sdm_session_keys(const uint8_t file_key[16], const uint8_t uid[7],
                          uint32_t read_ctr, uint8_t ses_enc[16],
                          uint8_t ses_mac[16])
 {
-    if (!file_key || !uid) return HCI_E_INVAL;
+    if (!file_key || !uid) return NCI_E_INVAL;
     uint8_t ctr[3];
     ctr_le3(read_ctr, ctr);
 
@@ -46,32 +46,32 @@ int hci_sdm_session_keys(const uint8_t file_key[16], const uint8_t uid[7],
     if (ses_enc) {
         sv[0] = 0xC3; sv[1] = 0x3C;
         if (crypto_aes_cmac(file_key, sv, sizeof sv, ses_enc) < 0)
-            return HCI_E_AUTH;
+            return NCI_E_AUTH;
     }
     if (ses_mac) {
         sv[0] = 0x3C; sv[1] = 0xC3;
         if (crypto_aes_cmac(file_key, sv, sizeof sv, ses_mac) < 0)
-            return HCI_E_AUTH;
+            return NCI_E_AUTH;
     }
-    return HCI_OK;
+    return NCI_OK;
 }
 
-int hci_sdm_mac(const uint8_t ses_mac_key[16], const uint8_t *input,
+int nci_sdm_mac(const uint8_t ses_mac_key[16], const uint8_t *input,
                 size_t len, uint8_t mac_out[8])
 {
-    if (!ses_mac_key || !mac_out) return HCI_E_INVAL;
+    if (!ses_mac_key || !mac_out) return NCI_E_INVAL;
     uint8_t full[16];
     if (crypto_aes_cmac(ses_mac_key, input, len, full) < 0)
-        return HCI_E_AUTH;
+        return NCI_E_AUTH;
     /* SDMMAC: the 8 odd-indexed bytes (1,3,5,7,9,11,13,15). */
     for (int i = 0; i < 8; i++) mac_out[i] = full[2 * i + 1];
-    return HCI_OK;
+    return NCI_OK;
 }
 
-int hci_sdm_decrypt_file_data(const uint8_t ses_enc_key[16], uint32_t read_ctr,
+int nci_sdm_decrypt_file_data(const uint8_t ses_enc_key[16], uint32_t read_ctr,
                               const uint8_t *enc, size_t len, uint8_t *out)
 {
-    if (!ses_enc_key || !enc || !out || (len % 16) != 0) return HCI_E_INVAL;
+    if (!ses_enc_key || !enc || !out || (len % 16) != 0) return NCI_E_INVAL;
     uint8_t ctr[3];
     ctr_le3(read_ctr, ctr);
 
@@ -79,41 +79,41 @@ int hci_sdm_decrypt_file_data(const uint8_t ses_enc_key[16], uint32_t read_ctr,
     uint8_t ivin[16] = { 0 };
     memcpy(ivin, ctr, 3);
     uint8_t iv[16];
-    if (crypto_aes_ecb_encrypt(ses_enc_key, ivin, iv) < 0) return HCI_E_AUTH;
+    if (crypto_aes_ecb_encrypt(ses_enc_key, ivin, iv) < 0) return NCI_E_AUTH;
 
     if (crypto_aes_cbc_decrypt(ses_enc_key, iv, enc, len, out) < 0)
-        return HCI_E_AUTH;
-    return HCI_OK;
+        return NCI_E_AUTH;
+    return NCI_OK;
 }
 
-int hci_sdm_verify(const uint8_t meta_key[16], const uint8_t file_key[16],
+int nci_sdm_verify(const uint8_t meta_key[16], const uint8_t file_key[16],
                    const uint8_t enc_picc[16],
                    const uint8_t *enc_file, size_t enc_file_len,
                    const uint8_t *mac_input, size_t mac_input_len,
-                   const uint8_t cmac[8], hci_sdm_result *out)
+                   const uint8_t cmac[8], nci_sdm_result *out)
 {
-    if (!meta_key || !file_key || !enc_picc || !cmac || !out) return HCI_E_INVAL;
+    if (!meta_key || !file_key || !enc_picc || !cmac || !out) return NCI_E_INVAL;
     memset(out, 0, sizeof *out);
 
-    int r = hci_sdm_decrypt_picc(meta_key, enc_picc, out->uid, &out->read_ctr);
-    if (r != HCI_OK) return r;
+    int r = nci_sdm_decrypt_picc(meta_key, enc_picc, out->uid, &out->read_ctr);
+    if (r != NCI_OK) return r;
 
     uint8_t ses_enc[16], ses_mac[16];
-    r = hci_sdm_session_keys(file_key, out->uid, out->read_ctr, ses_enc, ses_mac);
-    if (r != HCI_OK) return r;
+    r = nci_sdm_session_keys(file_key, out->uid, out->read_ctr, ses_enc, ses_mac);
+    if (r != NCI_OK) return r;
 
     uint8_t mac[8];
-    r = hci_sdm_mac(ses_mac, mac_input, mac_input_len, mac);
-    if (r != HCI_OK) return r;
+    r = nci_sdm_mac(ses_mac, mac_input, mac_input_len, mac);
+    if (r != NCI_OK) return r;
     out->mac_valid = (memcmp(mac, cmac, 8) == 0);
 
     if (enc_file && enc_file_len > 0 && enc_file_len <= sizeof out->file_data &&
         (enc_file_len % 16) == 0) {
-        if (hci_sdm_decrypt_file_data(ses_enc, out->read_ctr, enc_file,
-                                      enc_file_len, out->file_data) == HCI_OK)
+        if (nci_sdm_decrypt_file_data(ses_enc, out->read_ctr, enc_file,
+                                      enc_file_len, out->file_data) == NCI_OK)
             out->file_data_len = enc_file_len;
     }
-    return out->mac_valid ? HCI_OK : HCI_E_AUTH;
+    return out->mac_valid ? NCI_OK : NCI_E_AUTH;
 }
 
 /* ---- helpers ---------------------------------------------------------- */
@@ -125,7 +125,7 @@ static int hexval(char c)
     return -1;
 }
 
-int hci_hex2bin(const char *hex, uint8_t *out, size_t out_cap)
+int nci_hex2bin(const char *hex, uint8_t *out, size_t out_cap)
 {
     if (!hex || !out) return -1;
     size_t n = 0;
@@ -139,7 +139,7 @@ int hci_hex2bin(const char *hex, uint8_t *out, size_t out_cap)
     return (int)n;
 }
 
-int hci_url_param(const char *url, const char *key, char *buf, size_t cap)
+int nci_url_param(const char *url, const char *key, char *buf, size_t cap)
 {
     if (!url || !key || !buf || cap == 0) return -1;
     size_t klen = strlen(key);
@@ -159,12 +159,12 @@ int hci_url_param(const char *url, const char *key, char *buf, size_t cap)
     return -1;
 }
 
-int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_cap)
+int nci_sdm_encode_settings(const nci_sdm_settings *s, uint8_t *out, size_t out_cap)
 {
-    if (!s || !out) return HCI_E_INVAL;
+    if (!s || !out) return NCI_E_INVAL;
     size_t i = 0;
 
-    if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+    if (i + 3 > out_cap) return NCI_E_OVERFLOW;
     out[i++] = s->sdm_options;
     out[i++] = (uint8_t)(s->sdm_access_rights & 0xFF);
     out[i++] = (uint8_t)((s->sdm_access_rights >> 8) & 0xFF);
@@ -174,7 +174,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* UIDOffset: present if ((SDMOptions[Bit 7] = 1b) AND (SDMMetaRead access right = Eh)) */
     if ((s->sdm_options & 0x80) && (meta_read == 0x0E)) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->uid_offset & 0xFF;
         out[i++] = (s->uid_offset >> 8) & 0xFF;
         out[i++] = (s->uid_offset >> 16) & 0xFF;
@@ -182,7 +182,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* SDMReadCtrOffset: present if ((SDMOptions[Bit 6] = 1b) AND (SDMMetaRead access right = Eh)) */
     if ((s->sdm_options & 0x40) && (meta_read == 0x0E)) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->sdm_read_ctr_offset & 0xFF;
         out[i++] = (s->sdm_read_ctr_offset >> 8) & 0xFF;
         out[i++] = (s->sdm_read_ctr_offset >> 16) & 0xFF;
@@ -190,7 +190,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* PICCDataOffset: present if SDMMetaRead access right = 0h..4h */
     if (meta_read <= 0x04) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->picc_data_offset & 0xFF;
         out[i++] = (s->picc_data_offset >> 8) & 0xFF;
         out[i++] = (s->picc_data_offset >> 16) & 0xFF;
@@ -198,7 +198,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* SDMMACInputOffset: present if SDMFileRead access right != Fh */
     if (file_read != 0x0F) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->sdm_mac_input_offset & 0xFF;
         out[i++] = (s->sdm_mac_input_offset >> 8) & 0xFF;
         out[i++] = (s->sdm_mac_input_offset >> 16) & 0xFF;
@@ -206,7 +206,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* SDMENCOffset & SDMENCLength: present if ((SDMFileRead access right != Fh) AND (SDMOptions[Bit 4] = 1b)) */
     if ((file_read != 0x0F) && (s->sdm_options & 0x10)) {
-        if (i + 6 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 6 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->sdm_enc_offset & 0xFF;
         out[i++] = (s->sdm_enc_offset >> 8) & 0xFF;
         out[i++] = (s->sdm_enc_offset >> 16) & 0xFF;
@@ -218,7 +218,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* SDMMACOffset: present if SDMFileRead access right != Fh */
     if (file_read != 0x0F) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->sdm_mac_offset & 0xFF;
         out[i++] = (s->sdm_mac_offset >> 8) & 0xFF;
         out[i++] = (s->sdm_mac_offset >> 16) & 0xFF;
@@ -226,7 +226,7 @@ int hci_sdm_encode_settings(const hci_sdm_settings *s, uint8_t *out, size_t out_
 
     /* SDMReadCtrLimit: present if SDMOptions[Bit 5] = 1b */
     if (s->sdm_options & 0x20) {
-        if (i + 3 > out_cap) return HCI_E_OVERFLOW;
+        if (i + 3 > out_cap) return NCI_E_OVERFLOW;
         out[i++] = s->sdm_read_ctr_limit & 0xFF;
         out[i++] = (s->sdm_read_ctr_limit >> 8) & 0xFF;
         out[i++] = (s->sdm_read_ctr_limit >> 16) & 0xFF;

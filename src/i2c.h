@@ -5,8 +5,8 @@
  * No NCI knowledge here - it just opens /dev/i2c-N, selects the slave
  * address, and does read()/write(). Packet framing lives one layer up.
  */
-#ifndef PN7160_I2C_H
-#define PN7160_I2C_H
+#ifndef NCI_I2C_H
+#define NCI_I2C_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -15,17 +15,17 @@
 extern "C" {
 #endif
 
-typedef struct pn7160_i2c pn7160_i2c;   /* opaque */
+typedef struct nci_i2c nci_i2c;   /* opaque */
 
-pn7160_i2c *pn7160_i2c_open(const char *bus, uint16_t addr);
-void        pn7160_i2c_close(pn7160_i2c *i);
+nci_i2c *nci_i2c_open(const char *bus, uint16_t addr);
+void        nci_i2c_close(nci_i2c *i);
 
 /* One I2C transaction each. Return bytes transferred, or <0 on error. */
-int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len);
-int pn7160_i2c_read (pn7160_i2c *i, uint8_t *buf, size_t len);
+int nci_i2c_write(nci_i2c *i, const uint8_t *buf, size_t len);
+int nci_i2c_read (nci_i2c *i, uint8_t *buf, size_t len);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* PN7160_I2C_H */
+#endif /* NCI_I2C_H */

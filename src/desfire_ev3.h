@@ -8,8 +8,8 @@
  * The parameter serialisers (desfire_ev3_*_params) are pure and unit-tested
  * for byte layout without needing a session.
  */
-#ifndef PN7160_DESFIRE_EV3_H
-#define PN7160_DESFIRE_EV3_H
+#ifndef NCI_DESFIRE_EV3_H
+#define NCI_DESFIRE_EV3_H
 
 #include "apdu.h"
 #include "desfire_ev2.h"
@@ -90,4 +90,4 @@ int desfire_ev3_read_transaction_mac(apdu_fn fn, void *ctx, desfire_ev2_session 
                                      uint8_t comm, uint8_t file_no,
                                      uint32_t *tmac_counter, uint8_t tmv[8]);
 
-#endif /* PN7160_DESFIRE_EV3_H */
+#endif /* NCI_DESFIRE_EV3_H */

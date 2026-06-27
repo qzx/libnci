@@ -3,12 +3,12 @@
  * test_nci - exercises the pure NCI layer against a mock transport.
  *
  * No hardware, no libgpiod, no I2C: this is the payoff of keeping nci.c
- * dependent only on the pn7160_transport vtable. We script the NFCC's
+ * dependent only on the nci_transport vtable. We script the NFCC's
  * responses and assert the bring-up sequence and UID parsing.
  */
 #include "nci.h"
 #include "transport.h"
-#include "pn7160/pn7160.h"
+#include "nci/nci.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -91,7 +91,7 @@ static const uint8_t ACT_NTF[] = {
 static void test_bringup_and_uid(void)
 {
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
 
@@ -103,20 +103,20 @@ static void test_bringup_and_uid(void)
     mock_push(&m, DISC_RSP,  sizeof DISC_RSP);
     mock_push(&m, ACT_NTF,   sizeof ACT_NTF);
 
-    nci_device_info info;
-    assert(nci_core_reset(&t, &info) == PN7160_OK);
+    nci_dev_info info;
+    assert(nci_core_reset(&t, &info) == NCI_OK);
     assert(info.nci_version == 0x20);
     assert(info.manuf_id == 0x04);
     assert(info.fw_info_len == 4);
 
-    assert(nci_core_init(&t, &info)  == PN7160_OK);
-    assert(nci_rf_discover_map(&t)   == PN7160_OK);
-    assert(nci_rf_discover(&t)       == PN7160_OK);
+    assert(nci_core_init(&t, &info)  == NCI_OK);
+    assert(nci_rf_discover_map(&t)   == NCI_OK);
+    assert(nci_rf_discover(&t)       == NCI_OK);
 
-    pn7160_tag tag;
+    nci_tag tag;
     int r = nci_wait_activation(&t, &tag, NULL, 1000);
-    assert(r == PN7160_TAG_FOUND);
-    assert(tag.protocol == PN7160_PROTO_T2T);
+    assert(r == NCI_TAG_FOUND);
+    assert(tag.protocol == NCI_PROTO_T2T);
     assert(tag.uid_len == 7);
     static const uint8_t expect[] = { 0x04, 0x9B, 0x1C, 0xD2, 0xE3, 0xF4, 0x80 };
     assert(memcmp(tag.uid, expect, 7) == 0);
@@ -128,10 +128,10 @@ static void test_bringup_and_uid(void)
 /* Directly unit-test the activation parser for each technology. */
 static void test_parse_nfca(void)
 {
-    pn7160_tag tag;
-    assert(nci_parse_activation(ACT_NTF, sizeof ACT_NTF, &tag) == PN7160_OK);
+    nci_tag tag;
+    assert(nci_parse_activation(ACT_NTF, sizeof ACT_NTF, &tag) == NCI_OK);
     assert(tag.uid_len == 7);
-    assert(tag.protocol == PN7160_PROTO_T2T);
+    assert(tag.protocol == NCI_PROTO_T2T);
     printf("  parse_nfca: OK\n");
 }
 
@@ -139,11 +139,11 @@ static void test_bad_status_fails(void)
 {
     static const uint8_t RESET_RSP_BAD[] = { 0x40, 0x00, 0x01, 0x03 }; /* status!=OK */
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, RESET_RSP_BAD, sizeof RESET_RSP_BAD);
-    assert(nci_core_reset(&t, NULL) == PN7160_ERR);
+    assert(nci_core_reset(&t, NULL) == NCI_ERR);
     printf("  bad_status_fails: OK\n");
 }
 
@@ -152,11 +152,11 @@ static void test_discover_mask(void)
 {
     static const uint8_t DISC_RSP_OK[] = { 0x41, 0x03, 0x01, 0x00 };
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, DISC_RSP_OK, sizeof DISC_RSP_OK);
-    assert(nci_rf_discover_mask(&t, HCI_TECH_A | HCI_TECH_B) == PN7160_OK);
+    assert(nci_rf_discover_mask(&t, NCI_TECH_A | NCI_TECH_B) == NCI_OK);
     /* Expect: 21 03 05 02 <A_poll> 01 <B_poll> 01 */
     assert(m.last_cmd_len == 8);
     assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x03);
@@ -178,13 +178,13 @@ static void test_poll_multi(void)
         0x61, 0x03, 0x09, 0x02, 0x02, 0x00, 0x03, 0x44, 0x00, 0x00, 0x00,
     };  /* disc 2, T2T, NFC-A, last (0x00) */
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, NTF1, sizeof NTF1);
     mock_push(&m, NTF2, sizeof NTF2);
 
-    pn7160_tag tag; nci_rf_conn conn; nci_disc_target tg[4]; size_t n = 0;
+    nci_tag tag; nci_rf_conn conn; nci_disc_target tg[4]; size_t n = 0;
     int r = nci_poll_ex(&t, &tag, &conn, tg, 4, &n, 100);
     assert(r == NCI_POLL_MULTI);
     assert(n == 2);
@@ -198,14 +198,14 @@ static void test_discover_select(void)
 {
     static const uint8_t SEL_RSP[] = { 0x41, 0x04, 0x01, 0x00 };
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, SEL_RSP, sizeof SEL_RSP);
     /* select disc 2, ISO-DEP -> interface 0x02 */
     assert(nci_iface_for_protocol(0x04) == 0x02);
     assert(nci_iface_for_protocol(0x02) == 0x01);   /* T2T -> Frame */
-    assert(nci_rf_discover_select(&t, 0x02, 0x04, 0x02) == PN7160_OK);
+    assert(nci_rf_discover_select(&t, 0x02, 0x04, 0x02) == NCI_OK);
     assert(m.last_cmd_len == 6);
     assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x04 && m.last_cmd[2] == 0x03);
     assert(m.last_cmd[3] == 0x02 && m.last_cmd[4] == 0x04 && m.last_cmd[5] == 0x02);
@@ -217,11 +217,11 @@ static void test_deactivate_modes(void)
 {
     static const uint8_t DEACT_RSP[] = { 0x41, 0x06, 0x01, 0x00 };
     mock m = {0};
-    pn7160_transport t = {
+    nci_transport t = {
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, DEACT_RSP, sizeof DEACT_RSP);
-    assert(nci_rf_deactivate(&t, 0x01 /*Sleep*/) == PN7160_OK);
+    assert(nci_rf_deactivate(&t, 0x01 /*Sleep*/) == NCI_OK);
     assert(m.last_cmd_len == 4);
     assert(m.last_cmd[0] == 0x21 && m.last_cmd[1] == 0x06 && m.last_cmd[3] == 0x01);
     printf("  deactivate_modes: OK (Sleep=0x01)\n");

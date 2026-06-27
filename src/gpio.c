@@ -22,7 +22,7 @@
 #include <unistd.h>
 #include <sys/eventfd.h>
 
-struct pn7160_gpio {
+struct nci_gpio {
     struct gpiod_chip         *chip;
     struct gpiod_line_request *out_req;  /* VEN + DWL (outputs) */
     struct gpiod_line_request *irq_req;  /* IRQ (rising-edge input) */
@@ -66,7 +66,7 @@ static bool read_chip_label(const char *path, char *out, size_t out_sz)
  * "pinctrl-rp1" chip first (Pi 5 can expose more than one with that label, and
  * only the one wired to the 40-pin header answers - the caller probes each),
  * then any other SoC header controller. */
-int pn7160_gpio_header_chips(char (*paths)[64], int max)
+int nci_gpio_header_chips(char (*paths)[64], int max)
 {
     int n = 0;
     /* rp1 pass scans high->low: when a Pi 5 exposes two "pinctrl-rp1" chips,
@@ -92,7 +92,7 @@ int pn7160_gpio_header_chips(char (*paths)[64], int max)
 static bool autodetect_chip(char *out, size_t out_sz)
 {
     char cands[8][64];
-    int n = pn7160_gpio_header_chips(cands, 8);
+    int n = nci_gpio_header_chips(cands, 8);
     if (n == 0) return false;
     snprintf(out, out_sz, "%s", cands[0]);
     return true;
@@ -116,7 +116,7 @@ request_outputs(struct gpiod_chip *chip, unsigned int ven, unsigned int dwl)
     unsigned int offs[2] = { ven, dwl };
     if (gpiod_line_config_add_line_settings(lc, offs, 2, s) < 0) goto out;
 
-    gpiod_request_config_set_consumer(rc, "pn7160-ctrl");
+    gpiod_request_config_set_consumer(rc, "nci-ctrl");
     req = gpiod_chip_request_lines(chip, rc, lc);
 out:
     gpiod_request_config_free(rc);
@@ -142,7 +142,7 @@ request_irq(struct gpiod_chip *chip, unsigned int irq)
     unsigned int offs[1] = { irq };
     if (gpiod_line_config_add_line_settings(lc, offs, 1, s) < 0) goto out;
 
-    gpiod_request_config_set_consumer(rc, "pn7160-irq");
+    gpiod_request_config_set_consumer(rc, "nci-irq");
     req = gpiod_chip_request_lines(chip, rc, lc);
 out:
     gpiod_request_config_free(rc);
@@ -154,10 +154,10 @@ out:
 /* ------------------------------------------------------------------ *
  * Public API
  * ------------------------------------------------------------------ */
-pn7160_gpio *pn7160_gpio_open(const pn7160_gpio_config *cfg)
+nci_gpio *nci_gpio_open(const nci_gpio_config *cfg)
 {
     if (!cfg) return NULL;
-    pn7160_gpio *g = calloc(1, sizeof *g);
+    nci_gpio *g = calloc(1, sizeof *g);
     if (!g) return NULL;
     g->ven = cfg->ven_offset;
     g->dwl = cfg->dwl_offset;
@@ -195,11 +195,11 @@ pn7160_gpio *pn7160_gpio_open(const pn7160_gpio_config *cfg)
     LOGD("gpio: %s VEN=%u IRQ=%u DWL=%u", g->path, g->ven, g->irq, g->dwl);
     return g;
 fail:
-    pn7160_gpio_close(g);
+    nci_gpio_close(g);
     return NULL;
 }
 
-void pn7160_gpio_close(pn7160_gpio *g)
+void nci_gpio_close(nci_gpio *g)
 {
     if (!g) return;
     if (g->abort_efd > 0) close(g->abort_efd);
@@ -210,8 +210,8 @@ void pn7160_gpio_close(pn7160_gpio *g)
 }
 
 /* Wake a blocked wait_irq (from another thread). One-shot: the next wait_irq
- * returns PN7160_GPIO_ABORTED and drains the signal. */
-void pn7160_gpio_abort(pn7160_gpio *g)
+ * returns NCI_GPIO_ABORTED and drains the signal. */
+void nci_gpio_abort(nci_gpio *g)
 {
     if (!g || g->abort_efd < 0) return;
     uint64_t one = 1;
@@ -226,17 +226,17 @@ static void set_line(struct gpiod_line_request *req, unsigned int off, bool high
         high ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE);
 }
 
-void pn7160_gpio_set_ven(pn7160_gpio *g, bool high)
+void nci_gpio_set_ven(nci_gpio *g, bool high)
 {
     if (g) set_line(g->out_req, g->ven, high);
 }
 
-void pn7160_gpio_set_dwl(pn7160_gpio *g, bool high)
+void nci_gpio_set_dwl(nci_gpio *g, bool high)
 {
     if (g) set_line(g->out_req, g->dwl, high);
 }
 
-int pn7160_gpio_wait_irq(pn7160_gpio *g, int timeout_ms)
+int nci_gpio_wait_irq(nci_gpio *g, int timeout_ms)
 {
     if (!g || !g->irq_req) return -1;
 
@@ -244,7 +244,7 @@ int pn7160_gpio_wait_irq(pn7160_gpio *g, int timeout_ms)
     if (g->abort_efd >= 0) {
         uint64_t v;
         if (read(g->abort_efd, &v, sizeof v) == (ssize_t)sizeof v)
-            return PN7160_GPIO_ABORTED;
+            return NCI_GPIO_ABORTED;
     }
 
     /* The chip holds IRQ high while a packet is pending. If we already
@@ -270,7 +270,7 @@ int pn7160_gpio_wait_irq(pn7160_gpio *g, int timeout_ms)
         uint64_t v;
         ssize_t rd = read(g->abort_efd, &v, sizeof v);
         (void)rd;
-        return PN7160_GPIO_ABORTED;
+        return NCI_GPIO_ABORTED;
     }
 
     if (fds[0].revents & POLLIN) {
@@ -285,7 +285,7 @@ int pn7160_gpio_wait_irq(pn7160_gpio *g, int timeout_ms)
     return 0;
 }
 
-int pn7160_gpio_read_irq(pn7160_gpio *g)
+int nci_gpio_read_irq(nci_gpio *g)
 {
     if (!g || !g->irq_req) return -1;
     enum gpiod_line_value v = gpiod_line_request_get_value(g->irq_req, g->irq);
@@ -293,7 +293,7 @@ int pn7160_gpio_read_irq(pn7160_gpio *g)
     return v == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0;
 }
 
-const char *pn7160_gpio_chip_path(pn7160_gpio *g)
+const char *nci_gpio_chip_path(nci_gpio *g)
 {
     return g ? g->path : "";
 }

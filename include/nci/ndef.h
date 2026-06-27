@@ -9,8 +9,8 @@
  * Builder: encode URI / Text / MIME / External / Smart Poster records, and an
  * incremental message builder that sets the MB/ME record flags correctly.
  */
-#ifndef HCINFC_NDEF_H
-#define HCINFC_NDEF_H
+#ifndef NCI_NDEF_H
+#define NCI_NDEF_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -161,4 +161,4 @@ int ndef_build_handover_select(const uint8_t *carrier_rec, size_t carrier_len,
 }
 #endif
 
-#endif /* HCINFC_NDEF_H */
+#endif /* NCI_NDEF_H */

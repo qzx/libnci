@@ -15,11 +15,11 @@
  *   value: 10 <C0|C1|C2> <block> ; 10 <value LE32>         -> 10 <st> (x2)
  *   xfer : 10 B0 <block>                                   -> 10 <st>
  */
-#ifndef PN7160_MIFARE_H
-#define PN7160_MIFARE_H
+#ifndef NCI_MIFARE_INT_H
+#define NCI_MIFARE_INT_H
 
 #include "apdu.h"
-#include "pn7160/pn7160.h"
+#include "nci/nci.h"
 
 #define MFC_KEY_A 0x60
 #define MFC_KEY_B 0x61
@@ -44,4 +44,4 @@ int mfc_transfer(apdu_fn fn, void *ctx, uint8_t block);
 void mfc_value_encode(uint8_t out[16], int32_t value, uint8_t addr);
 int  mfc_value_decode(const uint8_t in[16], int32_t *value);
 
-#endif /* PN7160_MIFARE_H */
+#endif /* NCI_MIFARE_INT_H */

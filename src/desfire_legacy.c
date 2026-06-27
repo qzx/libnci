@@ -39,40 +39,40 @@ static void derive_session_key(const uint8_t *rnda, const uint8_t *rndb,
 int desfire_auth_iso(apdu_fn fn, void *ctx, uint8_t key_no,
                      const uint8_t *key, size_t key_len, desfire_legacy_session *s)
 {
-    if (!s || (key_len != 16 && key_len != 24)) return PN7160_ERR;
+    if (!s || (key_len != 16 && key_len != 24)) return NCI_ERR;
     size_t rl = (key_len == 24) ? 16 : 8;    /* challenge length */
     memset(s, 0, sizeof *s);
 
     uint8_t resp[40]; size_t rn = 0; uint8_t status = 0;
     uint8_t p1[1] = { key_no };
-    if (desfire_apdu_raw(fn, ctx, 0x1A, p1, 1, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
-    if (status != ST_AF || rn != rl) { LOGE("desfire: ISO-auth part1 0x91%02x len %zu", status, rn); return PN7160_ERR; }
+    if (desfire_apdu_raw(fn, ctx, 0x1A, p1, 1, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    if (status != ST_AF || rn != rl) { LOGE("desfire: ISO-auth part1 0x91%02x len %zu", status, rn); return NCI_ERR; }
 
     uint8_t iv[BL] = {0}, rndb[16], rnda[16];
-    if (crypto_3des_cbc(key, key_len, iv, resp, rl, rndb, 0) != 0) return PN7160_ERR;
+    if (crypto_3des_cbc(key, key_len, iv, resp, rl, rndb, 0) != 0) return NCI_ERR;
     memcpy(iv, resp + rl - BL, BL);          /* IV = last received cipher block */
 
-    if (crypto_random(rnda, rl) != 0) return PN7160_ERR;
+    if (crypto_random(rnda, rl) != 0) return NCI_ERR;
     uint8_t token[32], enc[32];
     memcpy(token, rnda, rl);
     memcpy(token + rl, rndb, rl); rotl1(token + rl, rl);   /* RndB' */
-    if (crypto_3des_cbc(key, key_len, iv, token, 2 * rl, enc, 1) != 0) return PN7160_ERR;
+    if (crypto_3des_cbc(key, key_len, iv, token, 2 * rl, enc, 1) != 0) return NCI_ERR;
 
-    if (desfire_apdu_raw(fn, ctx, 0xAF, enc, (uint8_t)(2 * rl), resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
-    if (status != ST_OK || rn != rl) { LOGE("desfire: ISO-auth part2 0x91%02x len %zu (wrong key?)", status, rn); return PN7160_ERR; }
+    if (desfire_apdu_raw(fn, ctx, 0xAF, enc, (uint8_t)(2 * rl), resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    if (status != ST_OK || rn != rl) { LOGE("desfire: ISO-auth part2 0x91%02x len %zu (wrong key?)", status, rn); return NCI_ERR; }
 
     uint8_t iv2[BL]; memcpy(iv2, enc + 2 * rl - BL, BL);   /* IV = last sent block */
     uint8_t rnda_back[16], exp[16];
-    if (crypto_3des_cbc(key, key_len, iv2, resp, rl, rnda_back, 0) != 0) return PN7160_ERR;
+    if (crypto_3des_cbc(key, key_len, iv2, resp, rl, rnda_back, 0) != 0) return NCI_ERR;
     memcpy(exp, rnda, rl); rotl1(exp, rl);
-    if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: ISO-auth proof mismatch"); return PN7160_ERR; }
+    if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: ISO-auth proof mismatch"); return NCI_ERR; }
 
     derive_session_key(rnda, rndb, rl, key_len, s);
     s->key_no = key_no;
     LOGD("desfire: ISO-authenticated key %u", key_no);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* ---- AuthenticateLegacy (0x0A): D40, cipher = DES decrypt -------------- */
@@ -94,30 +94,30 @@ static int d40_send(const uint8_t *key, size_t kl, const uint8_t iv[BL],
 int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
                         const uint8_t *key, size_t key_len, desfire_legacy_session *s)
 {
-    if (!s || (key_len != 8 && key_len != 16)) return PN7160_ERR;
+    if (!s || (key_len != 8 && key_len != 16)) return NCI_ERR;
     size_t rl = BL;                          /* DES/2K3DES: 8-byte challenges */
     memset(s, 0, sizeof *s);
 
     uint8_t resp[24]; size_t rn = 0; uint8_t status = 0;
     uint8_t p1[1] = { key_no };
-    if (desfire_apdu_raw(fn, ctx, 0x0A, p1, 1, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
-    if (status != ST_AF || rn != rl) { LOGE("desfire: legacy-auth part1 0x91%02x len %zu", status, rn); return PN7160_ERR; }
+    if (desfire_apdu_raw(fn, ctx, 0x0A, p1, 1, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    if (status != ST_AF || rn != rl) { LOGE("desfire: legacy-auth part1 0x91%02x len %zu", status, rn); return NCI_ERR; }
 
     /* RndB = CBC-receive(decrypt) of ek_RndB, IV=0 (standard CBC decrypt). */
     uint8_t iv0[BL] = {0}, rndb[8], rnda[8], ek_rndb[8];
     memcpy(ek_rndb, resp, rl);
-    if (crypto_3des_cbc(key, key_len, iv0, resp, rl, rndb, 0) != 0) return PN7160_ERR;
+    if (crypto_3des_cbc(key, key_len, iv0, resp, rl, rndb, 0) != 0) return NCI_ERR;
 
-    if (crypto_random(rnda, rl) != 0) return PN7160_ERR;
+    if (crypto_random(rnda, rl) != 0) return NCI_ERR;
     uint8_t token[16], enc[16];
     memcpy(token, rnda, rl);
     memcpy(token + rl, rndb, rl); rotl1(token + rl, rl);   /* RndB' */
-    if (d40_send(key, key_len, iv0, token, 2 * rl, enc) != 0) return PN7160_ERR;
+    if (d40_send(key, key_len, iv0, token, 2 * rl, enc) != 0) return NCI_ERR;
 
-    if (desfire_apdu_raw(fn, ctx, 0xAF, enc, (uint8_t)(2 * rl), resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
-    if (status != ST_OK || rn != rl) { LOGE("desfire: legacy-auth part2 0x91%02x len %zu (wrong key?)", status, rn); return PN7160_ERR; }
+    if (desfire_apdu_raw(fn, ctx, 0xAF, enc, (uint8_t)(2 * rl), resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    if (status != ST_OK || rn != rl) { LOGE("desfire: legacy-auth part2 0x91%02x len %zu (wrong key?)", status, rn); return NCI_ERR; }
 
     /* RndA' (= RndA rotated left 1) is returned enciphered by the card's
      * encrypt with a zero IV (the D40 response is not chained from our token),
@@ -125,11 +125,11 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
     (void)ek_rndb;
     uint8_t rnda_back[8], exp[8];
     memcpy(exp, rnda, rl); rotl1(exp, rl);
-    if (crypto_3des_cbc(key, key_len, iv0, resp, rl, rnda_back, 0) != 0) return PN7160_ERR;
-    if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: legacy-auth proof mismatch"); return PN7160_ERR; }
+    if (crypto_3des_cbc(key, key_len, iv0, resp, rl, rnda_back, 0) != 0) return NCI_ERR;
+    if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: legacy-auth proof mismatch"); return NCI_ERR; }
 
     derive_session_key(rnda, rndb, rl, key_len, s);
     s->key_no = key_no;
     LOGD("desfire: legacy-authenticated key %u", key_no);
-    return PN7160_OK;
+    return NCI_OK;
 }

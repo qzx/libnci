@@ -7,7 +7,7 @@
  * truncated CMAC, encrypt file data) and assert the verifier inverts it and
  * recovers the UID/counter, plus tamper detection. Pure, no hardware.
  */
-#include "hcinfc/sdm.h"
+#include "nci/sdm.h"
 #include "crypto.h"
 
 #include <assert.h>
@@ -41,7 +41,7 @@ static void test_picc_roundtrip(void)
     make_enc_picc(enc);
     uint8_t uid[7];
     uint32_t ctr = 0;
-    assert(hci_sdm_decrypt_picc(META_KEY, enc, uid, &ctr) == HCI_OK);
+    assert(nci_sdm_decrypt_picc(META_KEY, enc, uid, &ctr) == NCI_OK);
     assert(memcmp(uid, UID, 7) == 0);
     assert(ctr == READ_CTR);
     printf("  picc_roundtrip: OK (uid=04958CAA5C5E80 ctr=%u)\n", ctr);
@@ -54,19 +54,19 @@ static void test_verify_picc_only(void)
 
     /* Compute the expected SDMMAC over an empty input (PICC-only mirroring). */
     uint8_t ses_enc[16], ses_mac[16], cmac[8];
-    assert(hci_sdm_session_keys(FILE_KEY, UID, READ_CTR, ses_enc, ses_mac) == HCI_OK);
-    assert(hci_sdm_mac(ses_mac, NULL, 0, cmac) == HCI_OK);
+    assert(nci_sdm_session_keys(FILE_KEY, UID, READ_CTR, ses_enc, ses_mac) == NCI_OK);
+    assert(nci_sdm_mac(ses_mac, NULL, 0, cmac) == NCI_OK);
 
-    hci_sdm_result res;
-    assert(hci_sdm_verify(META_KEY, FILE_KEY, enc, NULL, 0, NULL, 0, cmac, &res)
-           == HCI_OK);
+    nci_sdm_result res;
+    assert(nci_sdm_verify(META_KEY, FILE_KEY, enc, NULL, 0, NULL, 0, cmac, &res)
+           == NCI_OK);
     assert(res.mac_valid);
     assert(memcmp(res.uid, UID, 7) == 0 && res.read_ctr == READ_CTR);
 
     /* Tamper a CMAC byte -> must fail. */
     cmac[0] ^= 0xFF;
-    assert(hci_sdm_verify(META_KEY, FILE_KEY, enc, NULL, 0, NULL, 0, cmac, &res)
-           == HCI_E_AUTH);
+    assert(nci_sdm_verify(META_KEY, FILE_KEY, enc, NULL, 0, NULL, 0, cmac, &res)
+           == NCI_E_AUTH);
     assert(!res.mac_valid);
     printf("  verify_picc_only: OK (valid accepted, tamper rejected)\n");
 }
@@ -77,7 +77,7 @@ static void test_verify_with_filedata(void)
     make_enc_picc(enc);
 
     uint8_t ses_enc[16], ses_mac[16];
-    assert(hci_sdm_session_keys(FILE_KEY, UID, READ_CTR, ses_enc, ses_mac) == HCI_OK);
+    assert(nci_sdm_session_keys(FILE_KEY, UID, READ_CTR, ses_enc, ses_mac) == NCI_OK);
 
     /* Encrypt 16 bytes of file data the tag's way: IV = E(ses_enc, ctr||0). */
     const uint8_t plain[16] = "secret-payload!";
@@ -90,11 +90,11 @@ static void test_verify_with_filedata(void)
 
     /* The CMAC covers the encrypted file data (per the SDM offset config). */
     uint8_t cmac[8];
-    assert(hci_sdm_mac(ses_mac, enc_file, 16, cmac) == HCI_OK);
+    assert(nci_sdm_mac(ses_mac, enc_file, 16, cmac) == NCI_OK);
 
-    hci_sdm_result res;
-    assert(hci_sdm_verify(META_KEY, FILE_KEY, enc, enc_file, 16,
-                          enc_file, 16, cmac, &res) == HCI_OK);
+    nci_sdm_result res;
+    assert(nci_sdm_verify(META_KEY, FILE_KEY, enc, enc_file, 16,
+                          enc_file, 16, cmac, &res) == NCI_OK);
     assert(res.mac_valid);
     assert(res.file_data_len == 16);
     assert(memcmp(res.file_data, plain, 16) == 0);
@@ -104,23 +104,23 @@ static void test_verify_with_filedata(void)
 static void test_helpers(void)
 {
     uint8_t b[4];
-    assert(hci_hex2bin("DEADBEEF", b, sizeof b) == 4);
+    assert(nci_hex2bin("DEADBEEF", b, sizeof b) == 4);
     assert(b[0] == 0xDE && b[3] == 0xEF);
-    assert(hci_hex2bin("ABC", b, sizeof b) < 0);   /* odd length */
+    assert(nci_hex2bin("ABC", b, sizeof b) < 0);   /* odd length */
 
     char v[64];
     const char *url = "https://x.io/?picc_data=AABB&cmac=1122334455667788";
-    assert(hci_url_param(url, "picc_data", v, sizeof v) == 4);
+    assert(nci_url_param(url, "picc_data", v, sizeof v) == 4);
     assert(strcmp(v, "AABB") == 0);
-    assert(hci_url_param(url, "cmac", v, sizeof v) == 16);
+    assert(nci_url_param(url, "cmac", v, sizeof v) == 16);
     assert(strcmp(v, "1122334455667788") == 0);
-    assert(hci_url_param(url, "enc", v, sizeof v) < 0);
+    assert(nci_url_param(url, "enc", v, sizeof v) < 0);
     printf("  helpers: OK\n");
 }
 
 static void test_encode_settings(void)
 {
-    hci_sdm_settings s;
+    nci_sdm_settings s;
     memset(&s, 0, sizeof s);
     s.sdm_options = 0x40; /* Ctr mirror enabled */
     s.sdm_access_rights = 0xE1FF; /* MetaRead=E (Plain), FileRead=1 (Key 1), CtrRet=F */
@@ -129,7 +129,7 @@ static void test_encode_settings(void)
     s.sdm_mac_offset = 0x778899;
 
     uint8_t out[32];
-    int n = hci_sdm_encode_settings(&s, out, sizeof out);
+    int n = nci_sdm_encode_settings(&s, out, sizeof out);
     assert(n == 12);
     assert(out[0] == 0x40);
     assert(out[1] == 0xFF);
@@ -148,7 +148,7 @@ static void test_encode_settings(void)
     s.sdm_options = 0xC0; /* UID and Ctr mirror enabled */
     s.sdm_access_rights = 0x11FF; /* MetaRead=1, FileRead=1, CtrRet=F */
     s.picc_data_offset = 0xAABBCC;
-    n = hci_sdm_encode_settings(&s, out, sizeof out);
+    n = nci_sdm_encode_settings(&s, out, sizeof out);
     assert(n == 12);
     assert(out[0] == 0xC0);
     assert(out[1] == 0xFF);

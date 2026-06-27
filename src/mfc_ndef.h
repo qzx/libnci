@@ -6,13 +6,13 @@
  * The logic works over a block-I/O seam (`mfc_block_io`) so it can be exercised
  * against a RAM-backed card with no hardware - the same split used elsewhere via
  * apdu_fn. The hardware binding lives in device.c (auth + read/write through
- * hci_mfc_*). On a 1K, sector 0 holds MAD1 (AIDs for sectors 1-15); a sector is
+ * nci_mfc_*). On a 1K, sector 0 holds MAD1 (AIDs for sectors 1-15); a sector is
  * NDEF when its MAD entry is the NDEF AID 0xE103. NDEF data sectors carry the
  * NDEF-message TLV (0x03 len value) ended by the terminator TLV 0xFE, 48 usable
  * bytes per sector (3 data blocks).
  */
-#ifndef PN7160_MFC_NDEF_H
-#define PN7160_MFC_NDEF_H
+#ifndef NCI_MFC_NDEF_H
+#define NCI_MFC_NDEF_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -42,4 +42,4 @@ int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len);
 }
 #endif
 
-#endif /* PN7160_MFC_NDEF_H */
+#endif /* NCI_MFC_NDEF_H */

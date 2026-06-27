@@ -8,7 +8,7 @@
  *   nfc-detect [--chip /dev/gpiochipN] [--bus /dev/i2c-N] [--addr 0x28]
  *              [--ven N] [--irq N] [--dwl N]
  */
-#include "pn7160/pn7160.h"
+#include "nci/nci.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -18,9 +18,9 @@
 static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 
-static void print_uid(const pn7160_tag *t)
+static void print_uid(const nci_tag *t)
 {
-    printf("TAG  protocol=%s  uid=", pn7160_protocol_name(t->protocol));
+    printf("TAG  protocol=%s  uid=", nci_protocol_name(t->protocol));
     if (t->uid_len == 0) {
         printf("(none)");
     } else {
@@ -46,7 +46,7 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    pn7160_config cfg = pn7160_config_default();
+    nci_config cfg = nci_config_default();
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -65,27 +65,27 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_sigint);
 
     printf("opening PN7160 (bus=%s addr=0x%02x)...\n", cfg.i2c_bus, cfg.i2c_addr);
-    pn7160 *p = pn7160_open(&cfg);
+    nci *p = nci_open(NULL, &cfg);
     if (!p) {
         fprintf(stderr, "failed to open PN7160 (set PN7160_DEBUG=1 for detail)\n");
         return 1;
     }
-    printf("up: %s\n", pn7160_fw_version(p));
+    printf("up: %s\n", nci_fw_version(p));
 
-    if (pn7160_start_discovery(p) != PN7160_OK) {
+    if (nci_start_discovery(p, NCI_TECH_ALL) != NCI_OK) {
         fprintf(stderr, "failed to start discovery\n");
-        pn7160_close(p);
+        nci_close(p);
         return 1;
     }
     printf("polling - present a tag (Ctrl-C to quit)...\n");
 
     while (!g_stop) {
-        pn7160_tag tag;
-        int r = pn7160_poll(p, &tag, 500);   /* 500 ms slices => responsive Ctrl-C */
-        if (r == PN7160_TAG_FOUND) {
+        nci_tag tag;
+        int r = nci_poll(p, &tag, 500);   /* 500 ms slices => responsive Ctrl-C */
+        if (r == NCI_TAG_FOUND) {
             print_uid(&tag);
             /* Drop this tag and keep polling for the next one. */
-            pn7160_resume_discovery(p);
+            nci_resume_discovery(p);
         } else if (r < 0) {
             fprintf(stderr, "poll error\n");
             break;
@@ -93,6 +93,6 @@ int main(int argc, char **argv)
     }
 
     printf("\nclosing...\n");
-    pn7160_close(p);
+    nci_close(p);
     return 0;
 }

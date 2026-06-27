@@ -3,7 +3,7 @@
  * test_crc - CRC catalogue check values + ATS/ATQB parser unit tests.
  * Pure, no hardware.
  */
-#include "hcinfc/crc.h"
+#include "nci/crc.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -14,10 +14,10 @@ static const uint8_t CHECK[] = { '1','2','3','4','5','6','7','8','9' };
 static void test_crc_check_values(void)
 {
     /* Standard CRC-catalogue "check" values for the string "123456789". */
-    assert(hci_crc_a(CHECK, sizeof CHECK)      == 0xBF05);
-    assert(hci_crc_b(CHECK, sizeof CHECK)      == 0x906E);
-    assert(hci_crc_15693(CHECK, sizeof CHECK)  == 0x906E);
-    assert(hci_crc_felica(CHECK, sizeof CHECK) == 0x31C3);
+    assert(nci_crc_a(CHECK, sizeof CHECK)      == 0xBF05);
+    assert(nci_crc_b(CHECK, sizeof CHECK)      == 0x906E);
+    assert(nci_crc_15693(CHECK, sizeof CHECK)  == 0x906E);
+    assert(nci_crc_felica(CHECK, sizeof CHECK) == 0x31C3);
     printf("  crc_check_values: OK\n");
 }
 
@@ -27,13 +27,13 @@ static void test_crc_append_order(void)
     size_t  n = 0;
 
     memcpy(buf, CHECK, sizeof CHECK);
-    hci_crc_a_append(buf, sizeof CHECK, &n);
+    nci_crc_a_append(buf, sizeof CHECK, &n);
     assert(n == sizeof CHECK + 2);
     assert(buf[sizeof CHECK]     == 0x05);   /* LSB first */
     assert(buf[sizeof CHECK + 1] == 0xBF);
 
     memcpy(buf, CHECK, sizeof CHECK);
-    hci_crc_felica_append(buf, sizeof CHECK, &n);
+    nci_crc_felica_append(buf, sizeof CHECK, &n);
     assert(buf[sizeof CHECK]     == 0x31);   /* MSB first */
     assert(buf[sizeof CHECK + 1] == 0xC3);
     printf("  crc_append_order: OK\n");
@@ -44,8 +44,8 @@ static void test_parse_ats(void)
     /* TL=7, T0=0x78 (FSCI=8 -> FSC 256; TA1+TB1+TC1 present),
      * TA1=0x80, TB1=0x71 (FWI=7, SFGI=1), TC1=0x02 (CID), hist {AA BB}. */
     const uint8_t ats[] = { 0x07, 0x78, 0x80, 0x71, 0x02, 0xAA, 0xBB };
-    hci_ats_info a;
-    assert(hci_parse_ats(ats, sizeof ats, &a) == 0);
+    nci_ats_info a;
+    assert(nci_parse_ats(ats, sizeof ats, &a) == 0);
     assert(a.fsci == 8 && a.fsc == 256);
     assert(a.ta1_present && a.ta1 == 0x80);
     assert(a.tb1_present && a.fwi == 7 && a.sfgi == 1);
@@ -61,8 +61,8 @@ static void test_parse_atqb(void)
         0x50, 0x11, 0x22, 0x33, 0x44, 0xAA, 0xBB, 0xCC, 0xDD,
         0x00, 0x71, 0x81, 0x00,
     };
-    hci_atqb_info q;
-    assert(hci_parse_atqb(sensb, sizeof sensb, &q) == 0);
+    nci_atqb_info q;
+    assert(nci_parse_atqb(sensb, sizeof sensb, &q) == 0);
     assert(q.pupi[0] == 0x11 && q.pupi[3] == 0x44);
     assert(q.app_data[0] == 0xAA && q.app_data[3] == 0xDD);
     assert(q.fsci == 7 && q.fsc == 128);

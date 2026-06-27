@@ -2,7 +2,7 @@
 /*
  * test_ndef - NDEF parser completions + encoder round-trips. Pure.
  */
-#include "hcinfc/ndef.h"
+#include "nci/ndef.h"
 
 #include <assert.h>
 #include <stdio.h>

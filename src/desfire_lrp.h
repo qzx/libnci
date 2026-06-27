@@ -7,8 +7,8 @@
  * NT4H2421Gx §9.2). The session keys are an LRP context (secret plaintexts +
  * MAC/ENC updated keys), not a plain AES key.
  */
-#ifndef PN7160_DESFIRE_LRP_H
-#define PN7160_DESFIRE_LRP_H
+#ifndef NCI_DESFIRE_LRP_H
+#define NCI_DESFIRE_LRP_H
 
 #include <stdbool.h>
 #include "apdu.h"
@@ -59,4 +59,4 @@ int desfire_lrp_change_file_settings(apdu_fn fn, void *ctx, desfire_lrp_session 
                                      uint8_t file_no, uint8_t file_option,
                                      uint16_t access_rights);
 
-#endif /* PN7160_DESFIRE_LRP_H */
+#endif /* NCI_DESFIRE_LRP_H */

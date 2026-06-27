@@ -1,4 +1,4 @@
-# libhcinfc — feature status
+# libnci — feature status
 
 Tracks every item from `implementation.txt` against what is in the tree.
 Legend:
@@ -35,7 +35,7 @@ real UID + VALID - i.e. cryptographically sound.
 
 Four real fixes came out of bring-up and testing on this board:
 - **GPIO auto-detect** (`src/gpio.c`): a Pi 5 exposes two `pinctrl-rp1` chips
-  (gpiochip0 + gpiochip4); only gpiochip4 is wired to the header. `hci_open`
+  (gpiochip0 + gpiochip4); only gpiochip4 is wired to the header. `nci_open`
   now enumerates candidates and probes each with CORE_RESET, keeping the one
   that answers (higher-numbered rp1 first to avoid noise).
 - **I2C read retry** (`src/i2c.c`): the PN7160 transiently NAKs a read
@@ -61,28 +61,27 @@ messaging / command-counter desync. Fixed and validated by `desfire-session-test
 - **CmdCtr advances on success only**, and any command error ends the session
   (this card terminates the channel on error - the next command returns `0x7E`),
   so the caller re-authenticates instead of getting a silent desync cascade.
-- `pn7160_desfire_last_status()` exposes the DESFire status byte for diagnosis;
-  `pn7160_desfire_authenticate()` is the single recommended auth entry point.
+- `nci_desfire_last_status()` exposes the DESFire status byte for diagnosis;
+  `nci_desfire_authenticate()` is the single recommended auth entry point.
 
-The big structural change landed first: the project is now **libhcinfc**, and
-**pn7160 is one entry in a chipset registry** (`src/chips/pn7160.c`,
-`src/chipset.c`). The generic `hci_*` API (`include/hcinfc/`) is canonical; the
-old `pn7160_*` names remain as a compatibility shim. Adding a controller is a new
-file under `src/chips/`, no public-header changes.
+The big structural change: the project is **libnci**, and **pn7160 is one entry
+in a chipset registry** (`src/chips/pn7160.c`, `src/chipset.c`). The entire public
+API is `nci_*` / `NCI_*` (`include/nci/`); the handle type is `nci`. Adding a
+controller is a new file under `src/chips/`, with no public-header changes.
 
 ## 1. Core discovery & tag management
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
-| 1 | Tag poll with technology mask | ✅hw | `hci_start_discovery(tech)`; live: B-mask ignores an NFC-A tag, A-mask sees it. Unit-tested (`discover_mask`) |
-| 2 | Multi-tag field detection | ✅hw | `nci_poll_ex` collects the RF_DISCOVER_NTF list; `hci_list_targets` enumerates them (disc_id/proto/uid/sak). Live: MIFARE Classic + NTAG 424 DNA both detected at once |
-| 3 | Explicit tag selection | ✅hw | `nci_rf_discover_select`, `hci_select_tag/next`; live: selected each of two cards by disc_id and interacted (MIFARE auth+read, NTAG GetVersion), switched back and forth |
-| 4 | Tag presence check | ✅hw | `hci_tag_present` - real RF ping (sleep + re-select); validated on a live tag. Resets an ISO-DEP session |
-| 5 | Tag deselect (sleep) | ✅hw | `hci_deselect_tag` |
-| 6 | NCI deactivation modes | ✅hw | `hci_deactivate(IDLE/SLEEP/SLEEP_AF/DISCOVERY)`; unit-tested (`deactivate_modes`), exercised live |
-| 7 | RF interface switch | 🟢hw | `hci_switch_rf_interface` / `hci_rf_interface_of`; query + same-iface no-op validated live. A real Frame↔ISO-DEP switch needs a dual-interface card |
-| 8 | Abort in-progress command | ✅hw | `hci_abort` - real eventfd interrupt; live: an indefinite `hci_poll(-1)` returned HCI_E_ABORTED ~400 ms after a cross-thread abort |
-| 9 | Callback / async API | ✅hw | `hci_start_async`/`hci_stop_async` + `hci_tag_callbacks`; live: on_arrival fired, clean stop/join |
-| 10 | Device capability query | ✅hw | `hci_get_capabilities` (4 techs, 7 protocols, listen/NFC-DEP/fw-update, NCI 0x20) |
+| 1 | Tag poll with technology mask | ✅hw | `nci_start_discovery(tech)`; live: B-mask ignores an NFC-A tag, A-mask sees it. Unit-tested (`discover_mask`) |
+| 2 | Multi-tag field detection | ✅hw | `nci_poll_ex` collects the RF_DISCOVER_NTF list; `nci_list_targets` enumerates them (disc_id/proto/uid/sak). Live: MIFARE Classic + NTAG 424 DNA both detected at once |
+| 3 | Explicit tag selection | ✅hw | `nci_rf_discover_select`, `nci_select_tag/next`; live: selected each of two cards by disc_id and interacted (MIFARE auth+read, NTAG GetVersion), switched back and forth |
+| 4 | Tag presence check | ✅hw | `nci_tag_present` - real RF ping (sleep + re-select); validated on a live tag. Resets an ISO-DEP session |
+| 5 | Tag deselect (sleep) | ✅hw | `nci_deselect_tag` |
+| 6 | NCI deactivation modes | ✅hw | `nci_deactivate(IDLE/SLEEP/SLEEP_AF/DISCOVERY)`; unit-tested (`deactivate_modes`), exercised live |
+| 7 | RF interface switch | 🟢hw | `nci_switch_rf_interface` / `nci_rf_interface_of`; query + same-iface no-op validated live. A real Frame↔ISO-DEP switch needs a dual-interface card |
+| 8 | Abort in-progress command | ✅hw | `nci_abort` - real eventfd interrupt; live: an indefinite `nci_poll(-1)` returned NCI_E_ABORTED ~400 ms after a cross-thread abort |
+| 9 | Callback / async API | ✅hw | `nci_start_async`/`nci_stop_async` + `nci_tag_callbacks`; live: on_arrival fired, clean stop/join |
+| 10 | Device capability query | ✅hw | `nci_get_capabilities` (4 techs, 7 protocols, listen/NFC-DEP/fw-update, NCI 0x20) |
 
 All ten validated end-to-end against a live PN7160 + NTAG 424 DNA: **15/15 checks
 pass, stable across re-runs** (`scratchpad` harness). Surfaced one more real fix:
@@ -92,8 +91,8 @@ now drains a pending packet (when IRQ is asserted) or backs off and retries; the
 read/write paths also retry EREMOTEIO. This made the transition rock-solid.
 
 **Multi-tag, validated live with two cards at once** (MIFARE Classic 1K + NTAG
-424 DNA in the field together): `hci_list_targets` enumerates every detected
-target and `hci_select_tag(disc_id, proto)` activates a chosen one. This surfaced
+424 DNA in the field together): `nci_list_targets` enumerates every detected
+target and `nci_select_tag(disc_id, proto)` activates a chosen one. This surfaced
 a real bug in the RF_DISCOVER_NTF collector: the "more notifications follow" flag
 is NCI Notification Type **0x02**, but the loop tested for `0x01` (which is
 actually *last*), so only the first of several targets was ever captured. Fixed
@@ -126,10 +125,10 @@ what physically responds; the code handles any count the NFCC reports.)
 ## 4. NDEF tag read/write/format
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
-| 24 | T4T NDEF **write** | ✅hw | `hci_ndef_write` (UPDATE BINARY: NLEN=0, data, NLEN). Validated on a DESFire EV3 |
-| 25 | T4T format | ✅hw | `hci_ndef_format` (NLEN=0). Validated |
-| 26 | T4T make read-only | ✅hw | `hci_ndef_make_read_only` (CC write byte -> 0xFF); subsequent write correctly refused |
-| 27 | T4T NDEF check | ✅hw | `hci_ndef_check` (is_ndef/writable/length/max). Validated |
+| 24 | T4T NDEF **write** | ✅hw | `nci_ndef_write` (UPDATE BINARY: NLEN=0, data, NLEN). Validated on a DESFire EV3 |
+| 25 | T4T format | ✅hw | `nci_ndef_format` (NLEN=0). Validated |
+| 26 | T4T make read-only | ✅hw | `nci_ndef_make_read_only` (CC write byte -> 0xFF); subsequent write correctly refused |
+| 27 | T4T NDEF check | ✅hw | `nci_ndef_check` (is_ndef/writable/length/max). Validated |
 | 28–38 | T1T/T2T/T3T/T5T read/write/format | ⬜ | need a Frame-RF transceive path + the respective tag types - see [TEST_HARDWARE.md](TEST_HARDWARE.md) for the exact tags to acquire (Type 2/3/5; the EV3 is Type 4 only) |
 
 The DESFire EV3 has no NDEF app out of the box, so #24-27 were validated by first
@@ -143,12 +142,12 @@ Type 4 round-trip validated: format → check (empty) → write URI → read-bac
 ## 5. MIFARE Classic
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
-| 39 | Authenticate (Key A/B) | ✅hw | `hci_mfc_authenticate`; validated on a real 1K across sectors 0/1/2 |
-| 40 | Read block | ✅hw | `hci_mfc_read_block`; validated |
-| 41 | Write block | ✅hw | `hci_mfc_write_block`; validated (write→verify→restore on a live card) |
-| 42 | Value ops | ✅hw | `hci_mfc_increment/decrement/restore/transfer` + value blocks; validated (100→150→120) |
-| 43 | Key A/B management | ✅hw | `hci_mfc_write_trailer` + key constants (`hci_mfc_key_default/ndef/mad`); same write path |
-| 44 | NDEF via MAD | ✅hw | `hci_mfc_ndef_read/write/format_ndef` (`src/mfc_ndef.c`); live: wrote+read back a URI record through the MAD, blocks restored. MAD CRC-8 matches NXP (0x14) |
+| 39 | Authenticate (Key A/B) | ✅hw | `nci_mfc_authenticate`; validated on a real 1K across sectors 0/1/2 |
+| 40 | Read block | ✅hw | `nci_mfc_read_block`; validated |
+| 41 | Write block | ✅hw | `nci_mfc_write_block`; validated (write→verify→restore on a live card) |
+| 42 | Value ops | ✅hw | `nci_mfc_increment/decrement/restore/transfer` + value blocks; validated (100→150→120) |
+| 43 | Key A/B management | ✅hw | `nci_mfc_write_trailer` + key constants (`nci_mfc_key_default/ndef/mad`); same write path |
+| 44 | NDEF via MAD | ✅hw | `nci_mfc_ndef_read/write/format_ndef` (`src/mfc_ndef.c`); live: wrote+read back a URI record through the MAD, blocks restored. MAD CRC-8 matches NXP (0x14) |
 
 `src/mifare.c` speaks the PN7160's proprietary MIFARE NCI path (auth header 0x40,
 raw header 0x10; the NFCC runs Crypto1). Key findings, all validated on hardware:
@@ -163,7 +162,7 @@ raw header 0x10; the NFCC runs Crypto1). Key findings, all validated on hardware
   inc/dec operand phase gets no card reply, so the NFCC returns `0xB2`, which
   also counts as success.
 - A failed auth HALTs the card - re-activate (resume + poll) to try another key.
-- `hci_tag.sak`/`atqa` now exposed; SAK 0x08/0x18/0x09 ⇒ MIFARE Classic.
+- `nci_tag.sak`/`atqa` now exposed; SAK 0x08/0x18/0x09 ⇒ MIFARE Classic.
 
 The test card is NDEF-personalised (Key A = `D3F7D3F7D3F7`, Key B = `FF…FF`) with
 real data; every write used save→write→verify→restore and the card was left
@@ -177,22 +176,22 @@ byte-for-byte intact.
 ## 7. FeliCa / NFC-F
 | # | Feature | Status |
 |---|---------|--------|
-| 56–62 | polling, R/W w/o enc, request, search, 212/424 | ⬜ (RF transceive on hw); FeliCa CRC ✅ (`hci_crc_felica`) |
+| 56–62 | polling, R/W w/o enc, request, search, 212/424 | ⬜ (RF transceive on hw); FeliCa CRC ✅ (`nci_crc_felica`) |
 
 ## 8. NTAG 424 DNA
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
 | 63 | AuthenticateEV2First | ✅hw | validated on a real NTAG 424 DNA (factory key 0) |
-| 64 | AuthenticateEV2NonFirst | ✅hw | `pn7160_desfire_authenticate_nonfirst` (0x77, keeps TI/CmdCtr); live: re-auth mid-session, GetCardUID returns the same UID |
+| 64 | AuthenticateEV2NonFirst | ✅hw | `nci_desfire_authenticate_nonfirst` (0x77, keeps TI/CmdCtr); live: re-auth mid-session, GetCardUID returns the same UID |
 | 65 | ISO SELECT by DF / EF | ✅hw | `..._select_iso_df` (DF name) **and** `..._select_iso_ef` (EF id 0xE103/0xE104); live SELECT E104 |
-| 66 | ISOReadBinary | ✅hw | `pn7160_desfire_iso_read_binary` (00 B0); live: read the NDEF file (NLEN + SUN URL) |
-| 67 | ISOUpdateBinary | ✅hw | `pn7160_desfire_iso_update_binary` (00 D6); the path `ntag424-provision` uses to write the NDEF file |
-| 68 | ChangeFileSettings (+SDM) | ✅hw | `pn7160_desfire_change_file_settings`, `hci_sdm_encode_settings`; SDM enabled on a real tag |
-| 69 | ReadCounter (SDM) | ✅hw | `pn7160_desfire_get_file_counters` (native 0xF6, CommMode.Full) - secure exchange validated live (card returns a valid status); counter value also recovered via the SUN PICCData (seen incrementing) |
-| 70 | SetConfiguration | ✅hw | `pn7160_desfire_set_configuration` (0x5C, CommMode.Full); executed live to switch a tag to LRP mode (option 0x05). Its response is status-only (no MAC) - handled |
-| 71 | **SDM SUN decode** | ✅hw | `hci_sdm_decrypt_picc`, `hci_sdm_verify`; real tag UID recovered |
-| 72 | **SDM CMAC verify** | ✅hw | `hci_sdm_mac` truncated-CMAC; VALID on live taps |
-| 73 | **SDM EncFileData decrypt** | ✅ | `hci_sdm_decrypt_file_data` (test_sdm; not exercised by this tag's config) |
+| 66 | ISOReadBinary | ✅hw | `nci_desfire_iso_read_binary` (00 B0); live: read the NDEF file (NLEN + SUN URL) |
+| 67 | ISOUpdateBinary | ✅hw | `nci_desfire_iso_update_binary` (00 D6); the path `ntag424-provision` uses to write the NDEF file |
+| 68 | ChangeFileSettings (+SDM) | ✅hw | `nci_desfire_change_file_settings`, `nci_sdm_encode_settings`; SDM enabled on a real tag |
+| 69 | ReadCounter (SDM) | ✅hw | `nci_desfire_get_file_counters` (native 0xF6, CommMode.Full) - secure exchange validated live (card returns a valid status); counter value also recovered via the SUN PICCData (seen incrementing) |
+| 70 | SetConfiguration | ✅hw | `nci_desfire_set_configuration` (0x5C, CommMode.Full); executed live to switch a tag to LRP mode (option 0x05). Its response is status-only (no MAC) - handled |
+| 71 | **SDM SUN decode** | ✅hw | `nci_sdm_decrypt_picc`, `nci_sdm_verify`; real tag UID recovered |
+| 72 | **SDM CMAC verify** | ✅hw | `nci_sdm_mac` truncated-CMAC; VALID on live taps |
+| 73 | **SDM EncFileData decrypt** | ✅ | `nci_sdm_decrypt_file_data` (test_sdm; not exercised by this tag's config) |
 | 74 | LRP mode (auth + secure messaging) | ✅hw | `src/lrp.c` (AN12304: genkeys, evalLRP, LRP-CMAC, LRICB) + `src/desfire_lrp.c` (AuthenticateLRPFirst **and** the command layer: LRP-CMAC MAC + LRICB Full). Crypto KAT-validated (`test_lrp`); on a real LRP tag: auth, GetCardUID (real UID), ChangeFileSettings, and a WriteData→ReadData round-trip all under LRP |
 
 `ntag424-sdm` CLI verifies a scanned SUN URL offline (UID + counter + MAC + enc data).
@@ -209,14 +208,14 @@ MAC/Full command exchange.
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
 | 75 | EV2First + secure messaging | ✅hw | `desfire_ev2_*` |
-| 76 | AuthenticateEV2NonFirst | ✅hw | `pn7160_desfire_authenticate_nonfirst`; live: re-auth mid-session, UID matches |
-| 77 | AuthenticateLegacy (3DES) | ✅hw | `pn7160_desfire_authenticate_legacy` (0x0A, D40 decrypt-as-cipher); live on a 2K3DES app key. `src/desfire_legacy.c` + `crypto_3des_cbc` |
-| 78 | AuthenticateISO (3DES) | ✅hw | `pn7160_desfire_authenticate_iso` (0x1A, standard 3DES CBC, running IV); live on a 2K3DES app key (also handles 3K3DES, key_len 24) |
+| 76 | AuthenticateEV2NonFirst | ✅hw | `nci_desfire_authenticate_nonfirst`; live: re-auth mid-session, UID matches |
+| 77 | AuthenticateLegacy (3DES) | ✅hw | `nci_desfire_authenticate_legacy` (0x0A, D40 decrypt-as-cipher); live on a 2K3DES app key. `src/desfire_legacy.c` + `crypto_3des_cbc` |
+| 78 | AuthenticateISO (3DES) | ✅hw | `nci_desfire_authenticate_iso` (0x1A, standard 3DES CBC, running IV); live on a 2K3DES app key (also handles 3K3DES, key_len 24) |
 | 79 | Large data chaining | ✅hw | native `0xAF` response continuation in `desfire_ev2_transact`; live: 256-byte StandardData read reassembled across frames. Large writes use offset chunking |
 | 80 | CreateValueFile | ✅hw | validated on a real EV3 |
 | 81 | ReadValue | ✅hw | validated |
 | 82 | Credit | ✅hw | validated |
-| 83 | Debit | ✅hw | `pn7160_desfire_debit`; re-validated standalone: 1000 +500 −300 = 1200 |
+| 83 | Debit | ✅hw | `nci_desfire_debit`; re-validated standalone: 1000 +500 −300 = 1200 |
 | 84 | LimitedCredit | ✅hw | validated |
 | 85–89 | Record files (create/read/write/clear) | ✅hw | linear + cyclic create/write/read/clear validated |
 | 90 | CreateBackupDataFile | ✅hw | create/write/commit/read validated |
@@ -224,12 +223,12 @@ MAC/Full command exchange.
 | 93 | GetISOFileIDs | ✅ hw | `0x61` lists the ISO File IDs of files in the selected app. Hardware-validated in `desfire-ev3-test`: created an ISO-enabled app (KS2 ISO-FID bit) with EFs 0x1101/0x1102 → GetISOFileIDs returns exactly `1101 1102`. (Earlier 🟡 was a mistest - ISO File IDs only exist when the *app* is created ISO-enabled; a plain app has none to enumerate, which is correct, not a rejection.) |
 | 94–95 | Get/Change KeySettings | ✅hw | validated on a real EV3 |
 | 96 | GetApplicationIDs | ✅hw | `desfire_ev2_get_application_ids` (0x6A); live: enumerated app `000001` |
-| 97 | CommitReaderID | ✅hw | `pn7160_desfire_commit_reader_id` (0xC8, MAC mode); live: bound reader id, EncTMRI returned |
-| 98 | CreateTransactionMACFile | ✅hw | `pn7160_desfire_create_transaction_mac_file` (0xCE, Full; key enciphered) |
-| 99 | Read TransactionMAC file | ✅hw | `pn7160_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
-| 100 | Proximity Check | ✅hw | `pn7160_desfire_proximity_check`. Live on the EV3, 3/3 stable: PreparePC → ProximityCheck (8-byte RndC/RndR) → VerifyPC with `trunc_even(AES-CMAC(VC/PC-key=all-zero, 0xFD‖OPT‖pubRespTime‖RndR[8]‖RndC[8]))` - the card **accepts the reader MAC** (anti-relay check passes), pubRespTime=0x0320 recovered. Key fixes vs the failed blind crack: the **VC/PC key** (not session key) and an **8-byte** challenge (`MFDES_PC_CHALLENGE_LEN`). Card's own response-MAC layout not yet pinned (exposed via `card_mac`) |
+| 97 | CommitReaderID | ✅hw | `nci_desfire_commit_reader_id` (0xC8, MAC mode); live: bound reader id, EncTMRI returned |
+| 98 | CreateTransactionMACFile | ✅hw | `nci_desfire_create_transaction_mac_file` (0xCE, Full; key enciphered) |
+| 99 | Read TransactionMAC file | ✅hw | `nci_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
+| 100 | Proximity Check | ✅hw | `nci_desfire_proximity_check`. Live on the EV3, 3/3 stable: PreparePC → ProximityCheck (8-byte RndC/RndR) → VerifyPC with `trunc_even(AES-CMAC(VC/PC-key=all-zero, 0xFD‖OPT‖pubRespTime‖RndR[8]‖RndC[8]))` - the card **accepts the reader MAC** (anti-relay check passes), pubRespTime=0x0320 recovered. Key fixes vs the failed blind crack: the **VC/PC key** (not session key) and an **8-byte** challenge (`MFDES_PC_CHALLENGE_LEN`). Card's own response-MAC layout not yet pinned (exposed via `card_mac`) |
 | 101 | Delegated App Mgmt | 🟢 implemented + read-validated; create gated by NXP's keys | **`apps/desfire-dam.c`** CLI (scan/info/create/delete/lifecycle) + **`src/desfire_dam.c`** (appdata/cryptogram/DAMMAC builder ported clean-room from Proxmark3, CreateDelegatedApplication 0xC9 as C9+AF, GetDelegatedInfo 0x69). **GetDelegatedInfo validated** live (2-byte slot; slot → 0xA0 not-provisioned). **CreateDelegatedApplication un-validatable on this card**: the datasheet states the DAM keys are *"Factory loaded NXP's DAM keys for AppXplorer service support"* — i.e. **NXP-proprietary, NDA/service-only**. Empirically the DAMAuthKey (0x10) auth is denied **0x9D PERMISSION_DENIED** for *every* method (EV2First/ISO/legacy/AES) and *even inside a valid PICC-master session*; the keys can't be changed without knowing them (ChangeKey of a different key needs the old key). Validating create needs a card personalised with known DAM keys (NXP AppXplorer service). Command format/crypto/CLI are complete + Proxmark3-verified. See [PC_DAM_REVERSE_ENGINEERING.md](PC_DAM_REVERSE_ENGINEERING.md) |
-| 102 | SetConfiguration ext | ✅hw | `pn7160_desfire_set_configuration` (0x5C, Full); same command as NTAG #70, executed live |
+| 102 | SetConfiguration ext | ✅hw | `nci_desfire_set_configuration` (0x5C, Full); same command as NTAG #70, executed live |
 | 103 | LRP mode | ✅hw | shared LRP implementation (`src/lrp.c`, `src/desfire_lrp.c`); crypto vector-validated and AuthenticateLRPFirst validated on a real tag in LRP mode (see NTAG #74) |
 
 The TMAC suite (#97-99) is the EV3 differentiator and is validated live: a
@@ -249,7 +248,7 @@ Still deferred: #100 (RF-timed proximity, needs NFCC support), #101 (DAM).
 ## 12. PN7160 hardware / NCI extensions
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
-| 117 | SPI transport | 🟡 | `hci_config.bus_type`/`spi_speed_hz` + chipset `transport_open` hook scaffolded; SPI byte pipe todo |
+| 117 | SPI transport | 🟡 | `nci_config.bus_type`/`spi_speed_hz` + chipset `transport_open` hook scaffolded; SPI byte pipe todo |
 | 118 | Firmware download (DWL) | ⬜ | reset choreography already enters DWL mode; protocol todo |
 | 119 | RF field strength readback | ⬜ | |
 | 120 | Low-power standby | ⬜ | |
@@ -262,35 +261,35 @@ Still deferred: #100 (RF-timed proximity, needs NFCC support), #101 (DAM).
 ## 13. Error handling & diagnostics
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
-| 126 | Structured error codes | ✅ | `hci_status` enum |
-| 127 | `hci_strerror()` | ✅ | `device.c` |
-| 128 | NCI status passthrough | ✅ hw | the NCI layer records every RSP's status byte into `transport.last_nci_status`; `hci_last_status()` returns it, `hci_nci_status_str()` names the common codes. Validated: `0x00 STATUS_OK` after a successful poll. |
-| 129 | Verbose trace / logging | ✅ hw | 6 levels (SILENT/ERROR/WARN/INFO/NCI/BYTES) via `hci_set_log_level()`/`hci_get_log_level()` or `NCI_LOG=0..5` (legacy `PN7160_DEBUG`→NCI). No external dep. Validated live: L1 silent, L4 = NCI frames, L5 adds raw I2C bytes. |
-| 130 | `hci_device_info()` | ✅ | chipset + NCI version + fw |
+| 126 | Structured error codes | ✅ | `nci_status` enum |
+| 127 | `nci_strerror()` | ✅ | `device.c` |
+| 128 | NCI status passthrough | ✅ hw | the NCI layer records every RSP's status byte into `transport.last_nci_status`; `nci_last_status()` returns it, `nci_nci_status_str()` names the common codes. Validated: `0x00 STATUS_OK` after a successful poll. |
+| 129 | Verbose trace / logging | ✅ hw | 6 levels (SILENT/ERROR/WARN/INFO/NCI/BYTES) via `nci_set_log_level()`/`nci_get_log_level()` or `NCI_LOG=0..5` (legacy `PN7160_DEBUG`→NCI). No external dep. Validated live: L1 silent, L4 = NCI frames, L5 adds raw I2C bytes. |
+| 130 | `nci_device_info()` | ✅ | chipset + NCI version + fw |
 
 ## 14. CRC & protocol utilities
 | # | Feature | Status | Where |
 |---|---------|--------|-------|
-| 131 | CRC-A | ✅ | `hci_crc_a` (KAT 0xBF05) |
-| 132 | CRC-B | ✅ | `hci_crc_b` (KAT 0x906E) |
-| 133 | ISO 15693 CRC | ✅ | `hci_crc_15693` |
-| 134 | FeliCa CRC | ✅ | `hci_crc_felica` (KAT 0x31C3) |
-| 135 | ATS parsing | ✅ | `hci_parse_ats` (test_crc) |
-| 136 | ATQB parsing | ✅ | `hci_parse_atqb` (test_crc) |
+| 131 | CRC-A | ✅ | `nci_crc_a` (KAT 0xBF05) |
+| 132 | CRC-B | ✅ | `nci_crc_b` (KAT 0x906E) |
+| 133 | ISO 15693 CRC | ✅ | `nci_crc_15693` |
+| 134 | FeliCa CRC | ✅ | `nci_crc_felica` (KAT 0x31C3) |
+| 135 | ATS parsing | ✅ | `nci_parse_ats` (test_crc) |
+| 136 | ATQB parsing | ✅ | `nci_parse_atqb` (test_crc) |
 
 ## 15. Build & packaging
 | # | Feature | Status |
 |---|---------|--------|
-| 137 | pkg-config file | ✅ (`meson` pkgconfig.generate → `libhcinfc.pc`) |
+| 137 | pkg-config file | ✅ (`meson` pkgconfig.generate → `libnci.pc`) |
 | 138 | Versioned library | ✅ (project version 0.2.0; static lib today, soname when shared) |
 | 139 | Install targets | ✅ (headers + lib + pkg-config) |
-| 140 | Thread-safety doc | 🟡 (each `hci_dev` is single-threaded; documented in README) |
+| 140 | Thread-safety doc | 🟡 (each `nci_dev` is single-threaded; documented in README) |
 | 141 | CMake find module | ⬜ |
 
 ## 16. CLI tools
 | # | Tool | Status |
 |---|------|--------|
-| 142 | nfc-poll | ✅ (generic `hci_*`, `--chipset`/`--tech`/`--list`) |
+| 142 | nfc-poll | ✅ (generic `nci_*`, `--chipset`/`--tech`/`--list`) |
 | 143 | nfc-read-ndef | ✅ (pre-existing) |
 | 144 | nfc-write-ndef | ⬜ (needs T4T write) |
 | 145–150 | nfc-format / mfultralight / mfclassic / 15693 / scan-device / emulate | ⬜ |

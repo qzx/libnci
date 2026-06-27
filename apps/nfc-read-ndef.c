@@ -3,8 +3,8 @@
  * nfc-read-ndef - present a Type 4 tag (NTAG 424 DNA, DESFire-with-NDEF, ...)
  * and dump its NDEF message, decoding Text and URI records.
  */
-#include "pn7160/pn7160.h"
-#include "pn7160/ndef.h"
+#include "nci/nci.h"
+#include "nci/ndef.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -47,7 +47,7 @@ static void show_ndef(const uint8_t *msg, size_t len)
 
 int main(int argc, char **argv)
 {
-    pn7160_config cfg = pn7160_config_default();
+    nci_config cfg = nci_config_default();
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--chip") && i + 1 < argc) cfg.gpio_chip = argv[++i];
         else if (!strcmp(argv[i], "--bus") && i + 1 < argc) cfg.i2c_bus = argv[++i];
@@ -56,33 +56,33 @@ int main(int argc, char **argv)
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
-    pn7160 *p = pn7160_open(&cfg);
+    nci *p = nci_open(NULL, &cfg);
     if (!p) { fprintf(stderr, "open failed (PN7160_DEBUG=1 for detail)\n"); return 1; }
-    printf("up: %s\n", pn7160_fw_version(p));
-    if (pn7160_start_discovery(p) != PN7160_OK) { pn7160_close(p); return 1; }
+    printf("up: %s\n", nci_fw_version(p));
+    if (nci_start_discovery(p, NCI_TECH_ALL) != NCI_OK) { nci_close(p); return 1; }
     printf("present a Type 4 NDEF tag (Ctrl-C to quit)...\n");
 
     while (!g_stop) {
-        pn7160_tag tag;
-        int r = pn7160_poll(p, &tag, 500);
-        if (r != PN7160_TAG_FOUND) { if (r < 0) break; else continue; }
+        nci_tag tag;
+        int r = nci_poll(p, &tag, 500);
+        if (r != NCI_TAG_FOUND) { if (r < 0) break; else continue; }
 
-        printf("\n--- tag: %s, uid=", pn7160_protocol_name(tag.protocol));
+        printf("\n--- tag: %s, uid=", nci_protocol_name(tag.protocol));
         for (int i = 0; i < tag.uid_len; i++) printf("%02X", tag.uid[i]);
         printf(" ---\n");
 
-        if (!pn7160_tag_supports_apdu(p)) {
+        if (!nci_tag_supports_apdu(p)) {
             printf("not an ISO-DEP tag; no NDEF read possible\n");
         } else {
             uint8_t ndef[2048]; size_t n = 0;
-            if (pn7160_read_ndef(p, ndef, sizeof ndef, &n) == PN7160_OK)
+            if (nci_read_ndef(p, ndef, sizeof ndef, &n) == NCI_OK)
                 show_ndef(ndef, n);
             else
                 printf("no readable NDEF (needs auth, or not a Type 4 tag)\n");
         }
-        pn7160_resume_discovery(p);
+        nci_resume_discovery(p);
     }
     printf("\nclosing...\n");
-    pn7160_close(p);
+    nci_close(p);
     return 0;
 }

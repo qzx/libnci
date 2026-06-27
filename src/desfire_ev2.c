@@ -70,16 +70,16 @@ static int derive_session_keys(const uint8_t key[16], const uint8_t rnda[16],
     static const uint8_t h1[6] = { 0xA5, 0x5A, 0x00, 0x01, 0x00, 0x80 };
     static const uint8_t h2[6] = { 0x5A, 0xA5, 0x00, 0x01, 0x00, 0x80 };
     memcpy(sv, h1, 6); memcpy(sv + 6, tail, 26);
-    if (crypto_aes_cmac(key, sv, 32, s->ses_enc) != 0) return PN7160_ERR;
+    if (crypto_aes_cmac(key, sv, 32, s->ses_enc) != 0) return NCI_ERR;
     memcpy(sv, h2, 6); memcpy(sv + 6, tail, 26);
-    if (crypto_aes_cmac(key, sv, 32, s->ses_mac) != 0) return PN7160_ERR;
-    return PN7160_OK;
+    if (crypto_aes_cmac(key, sv, 32, s->ses_mac) != 0) return NCI_ERR;
+    return NCI_OK;
 }
 
 int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
                              const uint8_t key[16], desfire_ev2_session *s)
 {
-    if (!s) return PN7160_ERR;
+    if (!s) return NCI_ERR;
     memset(s, 0, sizeof *s);
 
     const uint8_t zero_iv[16] = {0};
@@ -88,46 +88,46 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
     /* Part 1: request encrypted RndB. */
     uint8_t p1[2] = { key_no, 0x00 };
     if (desfire_apdu_raw(fn, ctx, INS_AUTH_EV2_FIRST, p1, 2,
-                         resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+                         resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
     if (status != ST_AF || rn != 16) {
         LOGE("ev2: AuthEV2First part1 status 0x91%02x len %zu", status, rn);
-        return PN7160_ERR;
+        return NCI_ERR;
     }
     uint8_t rndb[16];
-    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, rndb) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, rndb) != 0) return NCI_ERR;
 
     /* Part 2: send E(RndA || RndB<<<1). */
     uint8_t rnda[16];
-    if (crypto_random(rnda, 16) != 0) return PN7160_ERR;
+    if (crypto_random(rnda, 16) != 0) return NCI_ERR;
     uint8_t both[32];
     memcpy(both, rnda, 16);
     memcpy(both + 16, rndb, 16);
     rotl1(both + 16, 16);                 /* RndB <<< 1 */
     uint8_t enc[32];
-    if (crypto_aes_cbc_encrypt(key, zero_iv, both, 32, enc) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_encrypt(key, zero_iv, both, 32, enc) != 0) return NCI_ERR;
 
     if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, enc, 32,
-                         resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+                         resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
     if (status != ST_OK || rn != 32) {
         LOGE("ev2: AuthEV2First part2 status 0x91%02x len %zu (wrong key?)",
              status, rn);
-        return PN7160_ERR;
+        return NCI_ERR;
     }
 
     /* Decrypt TI || RndA<<<1 || PDcap2(6) || PCDcap2(6); verify the proof. */
     uint8_t plain[32];
-    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 32, plain) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 32, plain) != 0) return NCI_ERR;
     uint8_t rnda_rot[16];
     memcpy(rnda_rot, rnda, 16);
     rotl1(rnda_rot, 16);
     if (memcmp(plain + 4, rnda_rot, 16) != 0) {
         LOGE("ev2: card proof (RndA') mismatch - auth failed");
-        return PN7160_ERR;
+        return NCI_ERR;
     }
 
-    if (derive_session_keys(key, rnda, rndb, s) != PN7160_OK) return PN7160_ERR;
+    if (derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
 
     memcpy(s->ti, plain, 4);
     s->cmd_ctr = 0;
@@ -135,7 +135,7 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
     s->active = true;
     LOGD("ev2: authenticated key %u, TI %02x%02x%02x%02x",
          key_no, s->ti[0], s->ti[1], s->ti[2], s->ti[3]);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* AuthenticateEV2NonFirst (0x77): re-key within an active transaction. Unlike
@@ -144,7 +144,7 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
 int desfire_ev2_authenticate_nonfirst(apdu_fn fn, void *ctx, uint8_t key_no,
                                       const uint8_t key[16], desfire_ev2_session *s)
 {
-    if (!s || !s->active) { LOGE("ev2: NonFirst needs an active session"); return PN7160_ERR; }
+    if (!s || !s->active) { LOGE("ev2: NonFirst needs an active session"); return NCI_ERR; }
     uint8_t saved_ti[4]; memcpy(saved_ti, s->ti, 4);
     uint16_t saved_ctr = s->cmd_ctr;
 
@@ -153,43 +153,43 @@ int desfire_ev2_authenticate_nonfirst(apdu_fn fn, void *ctx, uint8_t key_no,
 
     /* Part 1: 0x77 || KeyNo -> E(RndB). */
     uint8_t p1[1] = { key_no };
-    if (desfire_apdu_raw(fn, ctx, 0x77, p1, 1, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+    if (desfire_apdu_raw(fn, ctx, 0x77, p1, 1, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
     if (status != ST_AF || rn != 16) {
         LOGE("ev2: AuthNonFirst part1 status 0x91%02x len %zu", status, rn);
-        s->active = false; return PN7160_ERR;
+        s->active = false; return NCI_ERR;
     }
     uint8_t rndb[16];
-    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, rndb) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, rndb) != 0) return NCI_ERR;
 
     /* Part 2: E(RndA || RndB<<<1) -> E(RndA'). */
     uint8_t rnda[16];
-    if (crypto_random(rnda, 16) != 0) return PN7160_ERR;
+    if (crypto_random(rnda, 16) != 0) return NCI_ERR;
     uint8_t both[32];
     memcpy(both, rnda, 16); memcpy(both + 16, rndb, 16); rotl1(both + 16, 16);
     uint8_t enc[32];
-    if (crypto_aes_cbc_encrypt(key, zero_iv, both, 32, enc) != 0) return PN7160_ERR;
-    if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, enc, 32, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+    if (crypto_aes_cbc_encrypt(key, zero_iv, both, 32, enc) != 0) return NCI_ERR;
+    if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, enc, 32, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
     if (status != ST_OK || rn != 16) {
         LOGE("ev2: AuthNonFirst part2 status 0x91%02x len %zu (wrong key?)", status, rn);
-        s->active = false; return PN7160_ERR;
+        s->active = false; return NCI_ERR;
     }
     uint8_t plain[16];
-    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, plain) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_decrypt(key, zero_iv, resp, 16, plain) != 0) return NCI_ERR;
     uint8_t rnda_rot[16]; memcpy(rnda_rot, rnda, 16); rotl1(rnda_rot, 16);
     if (memcmp(plain, rnda_rot, 16) != 0) {
         LOGE("ev2: NonFirst proof (RndA') mismatch");
-        s->active = false; return PN7160_ERR;
+        s->active = false; return NCI_ERR;
     }
-    if (derive_session_keys(key, rnda, rndb, s) != PN7160_OK) return PN7160_ERR;
+    if (derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
 
     memcpy(s->ti, saved_ti, 4);   /* TI and CmdCtr are preserved across NonFirst */
     s->cmd_ctr = saved_ctr;
     s->key_no = key_no;
     s->active = true;
     LOGD("ev2: re-authenticated (NonFirst) key %u, TI kept, CmdCtr %u", key_no, s->cmd_ctr);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -199,7 +199,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                          bool tx_enc, bool rx_enc,
                          uint8_t *out, size_t out_cap, size_t *out_len)
 {
-    if (!s || !s->active) { LOGE("ev2: no session"); return PN7160_ERR; }
+    if (!s || !s->active) { LOGE("ev2: no session"); return NCI_ERR; }
 
     uint8_t ctr_lo = (uint8_t)(s->cmd_ctr & 0xFF);
     uint8_t ctr_hi = (uint8_t)((s->cmd_ctr >> 8) & 0xFF);
@@ -209,19 +209,19 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     if (data_len > 0 && tx_enc) {
         uint8_t padded[256];
         size_t pl = data_len;
-        if (pl + 16 > sizeof padded) return PN7160_ERR;
+        if (pl + 16 > sizeof padded) return NCI_ERR;
         memcpy(padded, cmd_data, data_len);
         /* ISO 9797-1 method 2: always append 0x80, then 0x00 to the next AES
          * block boundary (a full padding block is added when already aligned). */
         padded[pl++] = 0x80;
         while (pl % 16) padded[pl++] = 0x00;
         uint8_t ivc[16];
-        if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return PN7160_ERR;
+        if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
         if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, padded, pl, enc_data) != 0)
-            return PN7160_ERR;
+            return NCI_ERR;
         enc_len = pl;
     } else if (data_len > 0) {
-        if (data_len > sizeof enc_data) return PN7160_ERR;
+        if (data_len > sizeof enc_data) return NCI_ERR;
         memcpy(enc_data, cmd_data, data_len);
         enc_len = data_len;
     }
@@ -233,7 +233,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     if (hdr_len) { memcpy(macin + mi, cmd_header, hdr_len); mi += hdr_len; }
     if (enc_len) { memcpy(macin + mi, enc_data, enc_len); mi += enc_len; }
     uint8_t full[16], mact[8];
-    if (crypto_aes_cmac(s->ses_mac, macin, mi, full) != 0) return PN7160_ERR;
+    if (crypto_aes_cmac(s->ses_mac, macin, mi, full) != 0) return NCI_ERR;
     truncate_mac(full, mact);
 
     /* APDU data = CmdHeader | EncData | MACt. */
@@ -244,8 +244,8 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 
     uint8_t resp[1024]; size_t rn = 0; uint8_t status = 0;
     if (desfire_apdu_raw(fn, ctx, ins, apdu_data, (uint8_t)ad,
-                         resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+                         resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
 
     /* Native AF chaining (impl.txt #79): a response larger than one frame comes
      * back as several frames, each ending 0x91AF, until the final 0x9100. Pull
@@ -253,11 +253,11 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
      * response MAC rides the last frame, and the card counts the whole exchange
      * as one command (one CmdCtr step), so MAC/IV handling below is unchanged. */
     while (status == ST_AF) {
-        if (rn >= sizeof resp) { LOGE("ev2: chained response overflow"); return PN7160_ERR; }
+        if (rn >= sizeof resp) { LOGE("ev2: chained response overflow"); return NCI_ERR; }
         size_t more = 0; uint8_t st2 = 0;
         if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, NULL, 0,
-                             resp + rn, sizeof resp - rn, &more, &st2) != PN7160_OK)
-            return PN7160_ERR;
+                             resp + rn, sizeof resp - rn, &more, &st2) != NCI_OK)
+            return NCI_ERR;
         rn += more;
         status = st2;
     }
@@ -274,7 +274,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         LOGE("ev2: ins 0x%02x status 0x91%02x - session ended (re-auth needed)",
              ins, status);
         s->active = false;
-        return PN7160_ERR;
+        return NCI_ERR;
     }
 
     /* Success: the card has advanced its CmdCtr; match it. The response MAC and
@@ -287,9 +287,9 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
          * command was MAC-protected and the card accepted it; CmdCtr already
          * advanced above, keeping the session in sync. */
         if (out_len) *out_len = 0;
-        return PN7160_OK;
+        return NCI_OK;
     }
-    if (rn < 8) { LOGE("ev2: response missing MAC"); return PN7160_ERR; }
+    if (rn < 8) { LOGE("ev2: response missing MAC"); return NCI_ERR; }
     size_t enc_resp_len = rn - 8;
     const uint8_t *resp_mac = resp + enc_resp_len;
 
@@ -299,21 +299,21 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     memcpy(rin + ri, s->ti, 4); ri += 4;
     if (enc_resp_len) { memcpy(rin + ri, resp, enc_resp_len); ri += enc_resp_len; }
     uint8_t rfull[16], rmact[8];
-    if (crypto_aes_cmac(s->ses_mac, rin, ri, rfull) != 0) return PN7160_ERR;
+    if (crypto_aes_cmac(s->ses_mac, rin, ri, rfull) != 0) return NCI_ERR;
     truncate_mac(rfull, rmact);
     if (memcmp(rmact, resp_mac, 8) != 0) {
         LOGE("ev2: response MAC mismatch");
-        return PN7160_ERR;
+        return NCI_ERR;
     }
 
     size_t produced;
     if (rx_enc && enc_resp_len > 0) {
-        if (enc_resp_len % 16 != 0) { LOGE("ev2: resp not block-aligned"); return PN7160_ERR; }
+        if (enc_resp_len % 16 != 0) { LOGE("ev2: resp not block-aligned"); return NCI_ERR; }
         uint8_t ivr[16];
-        if (build_iv(s, 0x5A, 0xA5, ivr) != 0) return PN7160_ERR;
+        if (build_iv(s, 0x5A, 0xA5, ivr) != 0) return NCI_ERR;
         uint8_t dec[1024];
         if (crypto_aes_cbc_decrypt(s->ses_enc, ivr, resp, enc_resp_len, dec) != 0)
-            return PN7160_ERR;
+            return NCI_ERR;
         produced = enc_resp_len < out_cap ? enc_resp_len : out_cap;
         memcpy(out, dec, produced);
     } else {
@@ -322,7 +322,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     }
 
     if (out_len) *out_len = produced;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* A CommMode.Plain command issued inside an active EV2 session. Such a command
@@ -336,20 +336,20 @@ int desfire_ev2_plain(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t ins
                       const uint8_t *data, uint8_t data_len,
                       uint8_t *out, size_t out_cap, size_t *out_len)
 {
-    if (!s || !s->active) { LOGE("ev2: no session"); return PN7160_ERR; }
+    if (!s || !s->active) { LOGE("ev2: no session"); return NCI_ERR; }
     uint8_t status = 0; size_t n = 0;
     if (desfire_apdu_raw(fn, ctx, ins, data, data_len, out, out_cap, &n, &status)
-        != PN7160_OK)
-        return PN7160_ERR;
+        != NCI_OK)
+        return NCI_ERR;
     s->last_status = status;
     if (status != ST_OK) {
         LOGE("ev2: plain ins 0x%02x status 0x91%02x - session ended", ins, status);
         s->active = false;
-        return PN7160_ERR;
+        return NCI_ERR;
     }
     s->cmd_ctr++;
     if (out_len) *out_len = n;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 static void le24(uint8_t *p, uint32_t v)
@@ -386,11 +386,11 @@ static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm,
     if (comm == DF_COMM_PLAIN) {
         /* CommMode.Plain file: command + response are plain; CmdCtr advances. */
         if (desfire_ev2_plain(fn, ctx, s, INS_READ_DATA, hdr, 7, buf, sizeof buf,
-                              &n) != PN7160_OK)
-            return PN7160_ERR;
+                              &n) != NCI_OK)
+            return NCI_ERR;
     } else if (desfire_ev2_transact(fn, ctx, s, INS_READ_DATA, hdr, 7, NULL, 0,
-                                    false, dec, buf, sizeof buf, &n) != PN7160_OK) {
-        return PN7160_ERR;
+                                    false, dec, buf, sizeof buf, &n) != NCI_OK) {
+        return NCI_ERR;
     }
     size_t take = (length && length < n) ? length : n;   /* trim padding */
     if (!length && dec) {
@@ -400,7 +400,7 @@ static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm,
     if (take > out_cap) take = out_cap;
     memcpy(out, buf, take);
     if (out_len) *out_len = take;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -408,7 +408,7 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                           uint32_t length, uint8_t *out, size_t out_cap,
                           size_t *out_len)
 {
-    if (!s) return PN7160_ERR;
+    if (!s) return NCI_ERR;
     bool dec = (comm == DF_COMM_FULL);
     if (length == 0)   /* whole file in one go (caller-bounded by out_cap) */
         return read_one(fn, ctx, s, comm, file_no, offset, 0, out, out_cap, out_len);
@@ -422,13 +422,13 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         if (total + n > out_cap) n = (uint32_t)(out_cap - total);
         if (n == 0) break;
         if (read_one(fn, ctx, s, comm, file_no, offset + done, n,
-                     out + total, out_cap - total, &got) != PN7160_OK)
-            return PN7160_ERR;
+                     out + total, out_cap - total, &got) != NCI_OK)
+            return NCI_ERR;
         total += got; done += n;
         if (got < n) break;   /* short read */
     }
     if (out_len) *out_len = total;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_read_data_full(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -451,7 +451,7 @@ static int write_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm
     if (comm == DF_COMM_PLAIN) {
         /* CommMode.Plain file: header + data sent plain; CmdCtr advances. */
         uint8_t cmd[7 + 248];
-        if (len > sizeof cmd - 7) return PN7160_ERR;
+        if (len > sizeof cmd - 7) return NCI_ERR;
         memcpy(cmd, hdr, 7);
         if (len) memcpy(cmd + 7, data, len);
         return desfire_ev2_plain(fn, ctx, s, 0x3D, cmd, (uint8_t)(7 + len),
@@ -465,7 +465,7 @@ int desfire_ev2_write_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                            uint8_t comm, uint8_t file_no, uint32_t offset,
                            const uint8_t *data, uint32_t len)
 {
-    if (!s) return PN7160_ERR;
+    if (!s) return NCI_ERR;
     bool enc = (comm == DF_COMM_FULL);
     size_t chunk = frame_data_chunk(s->frame_size, enc);  /* per-frame max */
     if (len == 0)
@@ -474,11 +474,11 @@ int desfire_ev2_write_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
      * EV2 command, so this works on Standard files without chaining). */
     for (uint32_t done = 0; done < len; ) {
         uint32_t n = (len - done) < chunk ? (len - done) : (uint32_t)chunk;
-        if (write_one(fn, ctx, s, comm, file_no, offset + done, data + done, n) != PN7160_OK)
-            return PN7160_ERR;
+        if (write_one(fn, ctx, s, comm, file_no, offset + done, data + done, n) != NCI_OK)
+            return NCI_ERR;
         done += n;
     }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* ---- application / file management (MAC comm mode) ------------------- */
@@ -491,7 +491,7 @@ int desfire_ev2_create_application_ex(apdu_fn fn, void *ctx, desfire_ev2_session
 {
     uint8_t p[5 + 2 + 16];
     size_t i = 0;
-    if (iso_name_len > 16 || (iso_name_len != 0 && !iso_name)) return PN7160_ERR;
+    if (iso_name_len > 16 || (iso_name_len != 0 && !iso_name)) return NCI_ERR;
     le24(p, aid); i = 3;
     p[i++] = key_settings1;
     p[i++] = key_settings2;
@@ -538,11 +538,11 @@ int desfire_ev2_get_free_memory(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[16]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x6E, NULL, 0, NULL, 0,
-                             false, false, out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 3) return PN7160_ERR;
+                             false, false, out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 3) return NCI_ERR;
     if (bytes) *bytes = (uint32_t)out[0] | ((uint32_t)out[1] << 8) | ((uint32_t)out[2] << 16);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_create_std_data_file(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -579,18 +579,18 @@ int desfire_ev2_get_key_version(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[16]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x64, &key_no, 1, NULL, 0,
-                             false, false, out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 1) return PN7160_ERR;
+                             false, false, out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 1) return NCI_ERR;
     if (version) *version = out[0];
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                            uint8_t key_no, const uint8_t old_key[16],
                            const uint8_t new_key[16], uint8_t new_version)
 {
-    if (!s || !s->active) return PN7160_ERR;
+    if (!s || !s->active) return NCI_ERR;
     bool same = (key_no == s->key_no);
 
     /* Build the ChangeKey cryptogram (EV2): integrity is via the command CMAC,
@@ -616,20 +616,20 @@ int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     /* Encrypt with the command IV (uses the current CmdCtr, matching the
      * command MAC that desfire_ev2_transact will compute). */
     uint8_t ivc[16];
-    if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return PN7160_ERR;
+    if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
     uint8_t enc[48];
-    if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, plain, pl, enc) != 0) return PN7160_ERR;
+    if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, plain, pl, enc) != 0) return NCI_ERR;
 
     uint8_t hdr[1] = { key_no };
     uint8_t out[16]; size_t n = 0;
     int r = desfire_ev2_transact(fn, ctx, s, 0xC4, hdr, 1, enc, pl,
                                  false, false, out, sizeof out, &n);
-    if (r != PN7160_OK) return PN7160_ERR;
+    if (r != NCI_OK) return NCI_ERR;
     if (same) {
         s->active = false;     /* card invalidates the session on auth-key change */
         LOGD("ev2: ChangeKey rotated the authenticated key - session ended");
     }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_get_card_uid(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -637,11 +637,11 @@ int desfire_ev2_get_card_uid(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t buf[64]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, INS_GET_CARD_UID, NULL, 0, NULL, 0,
-                             false, true, buf, sizeof buf, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 7) { LOGE("ev2: GetCardUID short (%zu)", n); return PN7160_ERR; }
+                             false, true, buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 7) { LOGE("ev2: GetCardUID short (%zu)", n); return NCI_ERR; }
     memcpy(uid, buf, 7);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_get_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -658,11 +658,11 @@ int desfire_ev2_get_file_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[64]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x6F, NULL, 0, NULL, 0,
-                             false, false, out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
+                             false, false, out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
     if (count) *count = n;
     if (fids) { size_t m = n < cap ? n : cap; memcpy(fids, out, m); }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_get_application_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -670,8 +670,8 @@ int desfire_ev2_get_application_ids(apdu_fn fn, void *ctx, desfire_ev2_session *
 {
     uint8_t out[256]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x6A, NULL, 0, NULL, 0,
-                             false, false, out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
+                             false, false, out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
     size_t na = n / 3;
     if (count) *count = na;
     if (aids) {
@@ -680,7 +680,7 @@ int desfire_ev2_get_application_ids(apdu_fn fn, void *ctx, desfire_ev2_session *
             aids[i] = (uint32_t)out[3 * i] | ((uint32_t)out[3 * i + 1] << 8) |
                       ((uint32_t)out[3 * i + 2] << 16);
     }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -694,7 +694,7 @@ int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session 
     p[i++] = (uint8_t)(access_rights & 0xFF);
     p[i++] = (uint8_t)((access_rights >> 8) & 0xFF);
     if (sdm_len > 0 && sdm_data) {
-        if (i + sdm_len > sizeof p) return PN7160_ERR;
+        if (i + sdm_len > sizeof p) return NCI_ERR;
         memcpy(p + i, sdm_data, sdm_len);
         i += sdm_len;
     }
@@ -711,13 +711,13 @@ int desfire_ev2_get_file_counters(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[32]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0xF6, &file_no, 1, NULL, 0,
-                             false, true, out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 3) { LOGE("ev2: GetFileCounters short (%zu)", n); return PN7160_ERR; }
+                             false, true, out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 3) { LOGE("ev2: GetFileCounters short (%zu)", n); return NCI_ERR; }
     if (sdm_read_ctr)
         *sdm_read_ctr = (uint32_t)out[0] | ((uint32_t)out[1] << 8) |
                         ((uint32_t)out[2] << 16);   /* SDMReadCtr, LSB first */
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* SetConfiguration (0x5C), CommMode.Full: option byte + option-specific data.

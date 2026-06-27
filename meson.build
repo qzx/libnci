@@ -1,4 +1,4 @@
-project('hcinfc', 'c',
+project('nci', 'c',
   version: '0.2.0',
   license: 'Apache-2.0',
   default_options: ['c_std=c11', 'warning_level=3', 'werror=false'])
@@ -13,7 +13,7 @@ inc_public = include_directories('include')
 # --- core library ---------------------------------------------------------
 # Hardware/transport layer + chipset drivers + generic device core + the pure
 # card-application and protocol layers. pn7160 is one chipset under src/chips/.
-hcinfc_sources = [
+nci_sources = [
   'src/gpio.c', 'src/i2c.c', 'src/transport.c',
   'src/nci.c', 'src/chipset.c', 'src/chips/pn7160.c', 'src/device.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
@@ -22,18 +22,19 @@ hcinfc_sources = [
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
 ]
 
-hcinfc_lib = static_library('hcinfc',
-  hcinfc_sources,
+nci_lib = static_library('nci',
+  nci_sources,
   include_directories: inc_all,
   dependencies: [libgpiod, libcrypto, libthreads],
   install: true)
 
-hcinfc_dep = declare_dependency(
+nci_dep = declare_dependency(
   include_directories: inc_public,
-  link_with: hcinfc_lib)
+  link_with: nci_lib)
 
-# Back-compat alias for downstreams that referenced the old name.
-pn7160_dep = hcinfc_dep
+# Back-compat aliases for downstreams that referenced the old names.
+hcinfc_dep = nci_dep
+pn7160_dep = nci_dep
 
 # --- demo / CLI apps -------------------------------------------------------
 foreach app : ['nfc-detect', 'nfc-read-ndef', 'desfire-info', 'desfire-auth',
@@ -42,17 +43,16 @@ foreach app : ['nfc-detect', 'nfc-read-ndef', 'desfire-info', 'desfire-auth',
                'desfire-dam']
   executable(app, 'apps' / (app + '.c'),
     include_directories: inc_public,
-    link_with: hcinfc_lib,
+    link_with: nci_lib,
     dependencies: [libgpiod, libcrypto, libthreads],
     install: true)
 endforeach
 
 # --- installed headers + pkg-config (impl.txt #137, #139) -----------------
-install_subdir('include/hcinfc', install_dir: get_option('includedir'))
-install_subdir('include/pn7160', install_dir: get_option('includedir'))
+install_subdir('include/nci', install_dir: get_option('includedir'))
 
-import('pkgconfig').generate(hcinfc_lib,
-  name: 'libhcinfc',
+import('pkgconfig').generate(nci_lib,
+  name: 'libnci',
   description: 'Modern NFC reader/writer stack (PN7160 and other NCI controllers)',
   subdirs: '.',
   requires_private: ['libcrypto'],

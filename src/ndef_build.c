@@ -5,7 +5,7 @@
  * Single-record one-shot encoders (URI/Text/MIME/External/Smart Poster) plus
  * an incremental multi-record builder that fixes up the MB/ME flags.
  */
-#include "hcinfc/ndef.h"
+#include "nci/ndef.h"
 #include <string.h>
 
 #define F_MB 0x80

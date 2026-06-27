@@ -63,7 +63,7 @@ int desfire_dam_create(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                        const uint8_t *appdata, size_t alen,
                        const uint8_t *contdata, size_t clen)
 {
-    if (!s || !s->active) { LOGE("dam: no session"); return PN7160_ERR; }
+    if (!s || !s->active) { LOGE("dam: no session"); return NCI_ERR; }
     uint8_t ctr_lo = (uint8_t)(s->cmd_ctr & 0xFF), ctr_hi = (uint8_t)((s->cmd_ctr >> 8) & 0xFF);
 
     /* EV2 command MAC over Cmd || CmdCtr || TI || appdata || contdata, appended
@@ -74,25 +74,25 @@ int desfire_dam_create(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     memcpy(macin + mi, appdata, alen); mi += alen;
     memcpy(macin + mi, contdata, clen); mi += clen;
     uint8_t full[16], mact[8];
-    if (crypto_aes_cmac(s->ses_mac, macin, mi, full) != 0) return PN7160_ERR;
+    if (crypto_aes_cmac(s->ses_mac, macin, mi, full) != 0) return NCI_ERR;
     trunc8(full, mact);
 
     uint8_t resp[64]; size_t rn = 0; uint8_t status = 0;
     /* Frame 1: C9 || appdata -> AF */
-    if (desfire_apdu_raw(fn, ctx, INS_CREATE_DELEGATED, appdata, alen, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
-    if (status != ST_AF) { LOGE("dam: C9 frame status 0x91%02x", status); s->last_status = status; s->active = false; return PN7160_ERR; }
+    if (desfire_apdu_raw(fn, ctx, INS_CREATE_DELEGATED, appdata, alen, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    if (status != ST_AF) { LOGE("dam: C9 frame status 0x91%02x", status); s->last_status = status; s->active = false; return NCI_ERR; }
 
     /* Frame 2: AF || contdata || MACt -> OK */
     uint8_t f2[300]; size_t f2l = 0;
     memcpy(f2, contdata, clen); f2l += clen;
     memcpy(f2 + f2l, mact, 8); f2l += 8;
-    if (desfire_apdu_raw(fn, ctx, ST_AF, f2, f2l, resp, sizeof resp, &rn, &status) != PN7160_OK)
-        return PN7160_ERR;
+    if (desfire_apdu_raw(fn, ctx, ST_AF, f2, f2l, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
     s->last_status = status;
-    if (status != ST_OK) { LOGE("dam: AF frame status 0x91%02x", status); s->active = false; return PN7160_ERR; }
+    if (status != ST_OK) { LOGE("dam: AF frame status 0x91%02x", status); s->active = false; return NCI_ERR; }
     s->cmd_ctr++;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_dam_get_info(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -101,9 +101,9 @@ int desfire_dam_get_info(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     uint8_t hdr[2] = { (uint8_t)(dam_slot & 0xFF), (uint8_t)((dam_slot >> 8) & 0xFF) };
     uint8_t buf[32]; size_t n = 0;
     if (desfire_ev2_transact(fn, ctx, s, INS_GET_DELEGATED, hdr, 2, NULL, 0,
-                             false, false, buf, sizeof buf, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 8) { LOGE("dam: GetDelegatedInfo short (%zu)", n); return PN7160_ERR; }
+                             false, false, buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 8) { LOGE("dam: GetDelegatedInfo short (%zu)", n); return NCI_ERR; }
     memcpy(out, buf, 8);
-    return PN7160_OK;
+    return NCI_OK;
 }

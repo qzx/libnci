@@ -44,17 +44,17 @@ int desfire_apdu_raw(apdu_fn fn, void *ctx, uint8_t ins,
     apdu[i++] = 0x00;   /* Le */
 
     uint8_t rx[256 + 2]; size_t rn = 0;
-    if (fn(ctx, apdu, i, rx, sizeof rx, &rn) < 0) return PN7160_ERR;
+    if (fn(ctx, apdu, i, rx, sizeof rx, &rn) < 0) return NCI_ERR;
     if (rn < 2 || rx[rn - 2] != 0x91) {
         LOGE("desfire: ins 0x%02x: not a wrapped response (len %zu)", ins, rn);
-        return PN7160_ERR;
+        return NCI_ERR;
     }
     *status = rx[rn - 1];
     size_t dlen = rn - 2;
     if (dlen > out_cap) dlen = out_cap;
     memcpy(out, rx, dlen);
     *out_len = dlen;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* Issue a command and gather all chained (0xAF) frames into out. Fails unless
@@ -65,31 +65,31 @@ static int exchange(apdu_fn fn, void *ctx, uint8_t ins,
 {
     size_t total = 0, n = 0;
     uint8_t status = 0;
-    if (desfire_apdu_raw(fn, ctx, ins, data, data_len, out, out_cap, &n, &status) != PN7160_OK)
-        return PN7160_ERR;
+    if (desfire_apdu_raw(fn, ctx, ins, data, data_len, out, out_cap, &n, &status) != NCI_OK)
+        return NCI_ERR;
     total += n;
     while (status == ST_ADDITIONAL_FRAME) {
         if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL_FRAME, NULL, 0,
-                out + total, out_cap - total, &n, &status) != PN7160_OK)
-            return PN7160_ERR;
+                out + total, out_cap - total, &n, &status) != NCI_OK)
+            return NCI_ERR;
         total += n;
     }
     if (status != ST_OK) {
         LOGE("desfire: ins 0x%02x failed, status 0x91%02x", ins, status);
-        return PN7160_ERR;
+        return NCI_ERR;
     }
     if (out_len) *out_len = total;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
-int desfire_get_version(apdu_fn fn, void *ctx, pn7160_desfire_version *out)
+int desfire_get_version(apdu_fn fn, void *ctx, nci_desfire_version *out)
 {
     uint8_t buf[64]; size_t n = 0;
-    if (exchange(fn, ctx, INS_GET_VERSION, NULL, 0, buf, sizeof buf, &n) != PN7160_OK)
-        return PN7160_ERR;
+    if (exchange(fn, ctx, INS_GET_VERSION, NULL, 0, buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
     if (n < 28) {
         LOGE("desfire: GetVersion short (%zu)", n);
-        return PN7160_ERR;
+        return NCI_ERR;
     }
     if (out) {
         memset(out, 0, sizeof *out);
@@ -104,7 +104,7 @@ int desfire_get_version(apdu_fn fn, void *ctx, pn7160_desfire_version *out)
         out->prod_week = buf[26];
         out->prod_year = buf[27];
     }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_get_application_ids(apdu_fn fn, void *ctx, uint32_t *aids,
@@ -112,15 +112,15 @@ int desfire_get_application_ids(apdu_fn fn, void *ctx, uint32_t *aids,
 {
     uint8_t buf[3 * 28 + 4]; size_t n = 0;
     if (exchange(fn, ctx, INS_GET_APPLICATION_IDS, NULL, 0,
-                 buf, sizeof buf, &n) != PN7160_OK)
-        return PN7160_ERR;
+                 buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
     size_t found = n / 3;
     if (count) *count = found < cap ? found : cap;
     for (size_t k = 0; k < found && k < cap; k++)
         aids[k] = (uint32_t)buf[k * 3] |
                   ((uint32_t)buf[k * 3 + 1] << 8) |
                   ((uint32_t)buf[k * 3 + 2] << 16);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_select_application(apdu_fn fn, void *ctx, uint32_t aid)
@@ -136,11 +136,11 @@ int desfire_get_file_ids(apdu_fn fn, void *ctx, uint8_t *fids,
                          size_t cap, size_t *count)
 {
     uint8_t buf[64]; size_t n = 0;
-    if (exchange(fn, ctx, INS_GET_FILE_IDS, NULL, 0, buf, sizeof buf, &n) != PN7160_OK)
-        return PN7160_ERR;
+    if (exchange(fn, ctx, INS_GET_FILE_IDS, NULL, 0, buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
     if (count) *count = n < cap ? n : cap;
     memcpy(fids, buf, n < cap ? n : cap);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_read_data_plain(apdu_fn fn, void *ctx, uint8_t file_no,
@@ -158,7 +158,7 @@ int desfire_read_data_plain(apdu_fn fn, void *ctx, uint8_t file_no,
 }
 
 /* ---- decode helpers --------------------------------------------------- */
-const char *pn7160_desfire_product(const pn7160_desfire_version *v)
+const char *nci_desfire_product(const nci_desfire_version *v)
 {
     if (!v) return "unknown";
     if (v->hw_vendor != 0x04) return "non-NXP";
@@ -190,7 +190,7 @@ const char *pn7160_desfire_product(const pn7160_desfire_version *v)
     }
 }
 
-uint32_t pn7160_desfire_storage_bytes(uint8_t storage_code)
+uint32_t nci_desfire_storage_bytes(uint8_t storage_code)
 {
     /* Storage size is 2^(n>>1); odd LSB means "between this and the next". */
     uint8_t exp = storage_code >> 1;

@@ -87,11 +87,11 @@ int desfire_ev3_get_value(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     uint8_t out[32]; size_t rn = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x6C, &file_no, 1, NULL, 0,
                              false, comm == DF_COMM_FULL, out, sizeof out, &rn)
-        != PN7160_OK)
-        return PN7160_ERR;
-    if (rn < 4) return PN7160_ERR;
+        != NCI_OK)
+        return NCI_ERR;
+    if (rn < 4) return NCI_ERR;
     if (value) *value = rd32(out);
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 static int value_op(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t ins,
@@ -231,8 +231,8 @@ int desfire_ev3_get_iso_file_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[128]; size_t rn = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x61, NULL, 0, NULL, 0,
-                             false, false, out, sizeof out, &rn) != PN7160_OK)
-        return PN7160_ERR;
+                             false, false, out, sizeof out, &rn) != NCI_OK)
+        return NCI_ERR;
     size_t n = rn / 2;
     if (count) *count = n;
     if (ids) {
@@ -240,7 +240,7 @@ int desfire_ev3_get_iso_file_ids(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         for (size_t i = 0; i < m; i++)
             ids[i] = (uint16_t)(out[2 * i] | (out[2 * i + 1] << 8));
     }
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev3_get_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -248,12 +248,12 @@ int desfire_ev3_get_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     uint8_t out[16]; size_t rn = 0;
     if (desfire_ev2_transact(fn, ctx, s, 0x45, NULL, 0, NULL, 0,
-                             false, false, out, sizeof out, &rn) != PN7160_OK)
-        return PN7160_ERR;
-    if (rn < 2) return PN7160_ERR;
+                             false, false, out, sizeof out, &rn) != NCI_OK)
+        return NCI_ERR;
+    if (rn < 2) return NCI_ERR;
     if (settings) *settings = out[0];
     if (max_keys) *max_keys = out[1];
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 int desfire_ev3_change_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
@@ -302,11 +302,11 @@ int desfire_ev3_commit_reader_id(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     /* CommMode.MAC: the 16-byte Reader ID is sent plain+MAC; the card returns
      * the (already card-enciphered) TMRI transmitted plain+MAC. */
     if (desfire_ev2_transact(fn, ctx, s, 0xC8, reader_id, 16, NULL, 0,
-                             false, false, out, sizeof out, &rn) != PN7160_OK)
-        return PN7160_ERR;
+                             false, false, out, sizeof out, &rn) != NCI_OK)
+        return NCI_ERR;
     if (enc_tmri) { size_t m = rn < cap ? rn : cap; memcpy(enc_tmri, out, m); }
     if (out_len) *out_len = rn;
-    return PN7160_OK;
+    return NCI_OK;
 }
 
 /* GetTransactionMACFile (read the TMAC file via ReadData): the content is the
@@ -317,12 +317,12 @@ int desfire_ev3_read_transaction_mac(apdu_fn fn, void *ctx, desfire_ev2_session 
 {
     uint8_t out[32]; size_t n = 0;
     if (desfire_ev2_read_data(fn, ctx, s, comm, file_no, 0, 0,
-                              out, sizeof out, &n) != PN7160_OK)
-        return PN7160_ERR;
-    if (n < 12) { LOGE("ev3: TMAC file short (%zu)", n); return PN7160_ERR; }
+                              out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 12) { LOGE("ev3: TMAC file short (%zu)", n); return NCI_ERR; }
     if (tmac_counter)
         *tmac_counter = (uint32_t)out[0] | ((uint32_t)out[1] << 8) |
                         ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24);
     if (tmv) memcpy(tmv, out + 4, 8);
-    return PN7160_OK;
+    return NCI_OK;
 }

@@ -12,8 +12,8 @@
  *
  * Pure and unit-tested against the AN12304 test vectors (docs/LRP.txt).
  */
-#ifndef PN7160_LRP_H
-#define PN7160_LRP_H
+#ifndef NCI_LRP_H
+#define NCI_LRP_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -48,4 +48,4 @@ int lrp_lricb(const lrp_ctx *c, int uk_idx, const uint8_t counter[4],
 /* Helper: expand `nbytes` bytes into 2*nbytes nibbles (MS nibble first). */
 void lrp_bytes_to_nibbles(const uint8_t *bytes, size_t nbytes, uint8_t *nibbles);
 
-#endif /* PN7160_LRP_H */
+#endif /* NCI_LRP_H */

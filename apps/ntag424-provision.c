@@ -19,10 +19,10 @@
  * all-zero key. --reset restores a plain (non-SDM) NDEF.
  */
 #define _POSIX_C_SOURCE 200809L   /* fdopen, gmtime, strftime */
-#include "pn7160/pn7160.h"
-#include "pn7160/desfire.h"
-#include "hcinfc/ndef.h"
-#include "hcinfc/sdm.h"
+#include "nci/nci.h"
+#include "nci/desfire.h"
+#include "nci/ndef.h"
+#include "nci/sdm.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -42,7 +42,7 @@ static void on_sig(int s) { (void)s; g_stop = 1; }
 
 static int parse_hex16(const char *h, uint8_t out[16])
 {
-    return hci_hex2bin(h, out, 16) == 16 ? 0 : -1;
+    return nci_hex2bin(h, out, 16) == 16 ? 0 : -1;
 }
 
 static void hexstr(const uint8_t *b, size_t n, char *out)
@@ -57,19 +57,19 @@ static void hexstr(const uint8_t *b, size_t n, char *out)
  * the file's (free) write access without a DESFire session - the native
  * WriteData (0x3D) is rejected 0x1C in this state. Must follow a SELECT of the
  * NDEF application. Returns 0 on success. */
-static int iso_write_ndef(pn7160 *p, const uint8_t *data, size_t len)
+static int iso_write_ndef(nci *p, const uint8_t *data, size_t len)
 {
     if (len > 255) return -1;
     uint8_t rx[32];
     const uint8_t sel_ef[] = { 0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x04 };
-    int n = pn7160_transceive(p, sel_ef, sizeof sel_ef, rx, sizeof rx, 1000);
+    int n = nci_transceive(p, sel_ef, sizeof sel_ef, rx, sizeof rx, 1000);
     if (n < 2 || rx[n - 2] != 0x90 || rx[n - 1] != 0x00) return -1;
 
     uint8_t apdu[5 + 255]; size_t i = 0;
     apdu[i++] = 0x00; apdu[i++] = 0xD6; apdu[i++] = 0x00; apdu[i++] = 0x00;
     apdu[i++] = (uint8_t)len;
     memcpy(apdu + i, data, len); i += len;
-    n = pn7160_transceive(p, apdu, i, rx, sizeof rx, 1000);
+    n = nci_transceive(p, apdu, i, rx, sizeof rx, 1000);
     if (n < 2) return -1;
     return (rx[n - 2] == 0x90 && rx[n - 1] == 0x00) ? 0 : -1;
 }
@@ -115,7 +115,7 @@ static int build_sun_file(const char *base, uint8_t *file, size_t cap,
 
 static int write_keyfile(const char *path, const char *uid_hex, const char *url,
                          const uint8_t meta_key[16], const uint8_t file_key[16],
-                         const hci_sdm_settings *s, uint8_t file_option,
+                         const nci_sdm_settings *s, uint8_t file_option,
                          uint16_t access_rights)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -128,7 +128,7 @@ static int write_keyfile(const char *path, const char *uid_hex, const char *url,
     time_t t = time(NULL);
     char when[32]; strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%SZ", gmtime(&t));
     fprintf(f,
-        "# libhcinfc NTAG 424 DNA SDM provisioning record\n"
+        "# libnci NTAG 424 DNA SDM provisioning record\n"
         "# written %s by ntag424-provision\n"
         "uid=%s\n"
         "ndef_aid=D2760000850101\n"
@@ -156,16 +156,16 @@ static int write_keyfile(const char *path, const char *uid_hex, const char *url,
 }
 
 /* Re-read the tag after provisioning and verify the live SUN message. */
-static int verify_sun(pn7160 *p, const uint8_t meta_key[16],
+static int verify_sun(nci *p, const uint8_t meta_key[16],
                       const uint8_t file_key[16])
 {
-    pn7160_resume_discovery(p);
-    pn7160_tag tag; int f = 0;
-    for (int i = 0; i < 20 && !f; i++) if (pn7160_poll(p, &tag, 500) == PN7160_TAG_FOUND) f = 1;
+    nci_resume_discovery(p);
+    nci_tag tag; int f = 0;
+    for (int i = 0; i < 20 && !f; i++) if (nci_poll(p, &tag, 500) == NCI_TAG_FOUND) f = 1;
     if (!f) { printf("verify: tag not re-detected\n"); return -1; }
 
     uint8_t ndef[512]; size_t n = 0;
-    if (pn7160_read_ndef(p, ndef, sizeof ndef, &n) != PN7160_OK) {
+    if (nci_read_ndef(p, ndef, sizeof ndef, &n) != NCI_OK) {
         printf("verify: NDEF read failed\n"); return -1;
     }
     ndef_record rec;
@@ -177,20 +177,20 @@ static int verify_sun(pn7160 *p, const uint8_t meta_key[16],
 
     char picc_hex[40], cmac_hex[20];
     uint8_t enc_picc[16], cmac[8];
-    if (hci_url_param(url, "picc_data", picc_hex, sizeof picc_hex) != 32 ||
-        hci_hex2bin(picc_hex, enc_picc, 16) != 16) {
+    if (nci_url_param(url, "picc_data", picc_hex, sizeof picc_hex) != 32 ||
+        nci_hex2bin(picc_hex, enc_picc, 16) != 16) {
         printf("verify: no/!=16B picc_data in URL\n"); return -1;
     }
-    if (hci_url_param(url, "cmac", cmac_hex, sizeof cmac_hex) != 16 ||
-        hci_hex2bin(cmac_hex, cmac, 8) != 8) {
+    if (nci_url_param(url, "cmac", cmac_hex, sizeof cmac_hex) != 16 ||
+        nci_hex2bin(cmac_hex, cmac, 8) != 8) {
         printf("verify: no/!=8B cmac in URL\n"); return -1;
     }
 
-    hci_sdm_result res;
-    int r = hci_sdm_verify(meta_key, file_key, enc_picc, NULL, 0, NULL, 0, cmac, &res);
+    nci_sdm_result res;
+    int r = nci_sdm_verify(meta_key, file_key, enc_picc, NULL, 0, NULL, 0, cmac, &res);
     printf("verify: UID="); for (int i = 0; i < 7; i++) printf("%02X", res.uid[i]);
     printf("  read_ctr=%u  SDMMAC=%s\n", res.read_ctr, res.mac_valid ? "VALID" : "INVALID");
-    return (r == HCI_OK && res.mac_valid) ? 0 : -1;
+    return (r == NCI_OK && res.mac_valid) ? 0 : -1;
 }
 
 int main(int argc, char **argv)
@@ -202,7 +202,7 @@ int main(int argc, char **argv)
      * key 1 (used for SDMMetaRead + SDMFileRead). old_sdm_key: its current
      * value, needed to rotate (factory all-zero by default). */
     uint8_t app_key[16] = {0}, sdm_key[16] = {0}, old_sdm_key[16] = {0};
-    pn7160_config cfg = pn7160_config_default();
+    nci_config cfg = nci_config_default();
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i]; int nx = (i + 1 < argc);
@@ -217,34 +217,34 @@ int main(int argc, char **argv)
     }
 
     signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
-    pn7160 *p = pn7160_open(&cfg);
+    nci *p = nci_open(NULL, &cfg);
     if (!p) { fprintf(stderr, "open failed\n"); return 1; }
-    if (pn7160_start_discovery(p) != PN7160_OK) { pn7160_close(p); return 1; }
+    if (nci_start_discovery(p, NCI_TECH_ALL) != NCI_OK) { nci_close(p); return 1; }
     printf("present the NTAG 424 DNA...\n");
 
-    pn7160_tag tag; int f = 0;
-    for (int i = 0; i < 40 && !f && !g_stop; i++) if (pn7160_poll(p, &tag, 500) == PN7160_TAG_FOUND) f = 1;
-    if (!f || !pn7160_tag_supports_apdu(p)) { fprintf(stderr, "no ISO-DEP tag\n"); pn7160_close(p); return 1; }
+    nci_tag tag; int f = 0;
+    for (int i = 0; i < 40 && !f && !g_stop; i++) if (nci_poll(p, &tag, 500) == NCI_TAG_FOUND) f = 1;
+    if (!f || !nci_tag_supports_apdu(p)) { fprintf(stderr, "no ISO-DEP tag\n"); nci_close(p); return 1; }
     char uid_hex[24]; hexstr(tag.uid, tag.uid_len, uid_hex);
     printf("tag uid=%s\n", uid_hex);
 
-    if (pn7160_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID) != PN7160_OK) {
-        fprintf(stderr, "select NDEF app failed\n"); pn7160_close(p); return 1;
+    if (nci_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID) != NCI_OK) {
+        fprintf(stderr, "select NDEF app failed\n"); nci_close(p); return 1;
     }
 
     if (reset) {
         /* Restore plain comm + free write, then rewrite a normal URL. */
-        if (pn7160_desfire_authenticate(p, 0, app_key) != PN7160_OK) {
-            fprintf(stderr, "auth failed (0x%02X)\n", pn7160_desfire_last_status(p));
-            pn7160_close(p); return 1;
+        if (nci_desfire_authenticate(p, 0, app_key) != NCI_OK) {
+            fprintf(stderr, "auth failed (0x%02X)\n", nci_desfire_last_status(p));
+            nci_close(p); return 1;
         }
-        int c = pn7160_desfire_change_file_settings(p, PN7160_DESFIRE_FULL, NDEF_FILE_NO,
+        int c = nci_desfire_change_file_settings(p, NCI_DESFIRE_FULL, NDEF_FILE_NO,
                                                     0x00 /*plain, no SDM*/, 0xEEE0, NULL, 0);
         /* Drop the session so the now-free write goes plain + unauthenticated. */
-        pn7160_resume_discovery(p);
+        nci_resume_discovery(p);
         int rf = 0;
-        for (int i = 0; i < 20 && !rf; i++) if (pn7160_poll(p, &tag, 500) == PN7160_TAG_FOUND) rf = 1;
-        pn7160_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID);
+        for (int i = 0; i < 20 && !rf; i++) if (nci_poll(p, &tag, 500) == NCI_TAG_FOUND) rf = 1;
+        nci_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID);
         uint8_t plain[40]; size_t pi = 0;
         const char *u = "rpg.qzx.is"; size_t blen = strlen(u);
         size_t plen = 1 + blen;
@@ -254,7 +254,7 @@ int main(int argc, char **argv)
         int w = iso_write_ndef(p, plain, pi);
         printf("reset: change_settings=%d write=%d -> %s\n", c, w,
                (c == 0 && w == 0) ? "NDEF restored to plain URL" : "FAILED");
-        pn7160_close(p);
+        nci_close(p);
         return (c == 0 && w == 0) ? 0 : 1;
     }
 
@@ -263,32 +263,32 @@ int main(int argc, char **argv)
      * in-session comm-mode rules). */
     uint8_t file[256]; uint32_t picc_off = 0, mac_off = 0;
     int flen = build_sun_file(base, file, sizeof file, &picc_off, &mac_off);
-    if (flen < 0) { fprintf(stderr, "template too large\n"); pn7160_close(p); return 1; }
+    if (flen < 0) { fprintf(stderr, "template too large\n"); nci_close(p); return 1; }
     char url[400];
     snprintf(url, sizeof url, "https://%s?picc_data=<32hex>&cmac=<16hex>", base);
     printf("template: %d bytes, picc_data@%u cmac@%u\n", flen, picc_off, mac_off);
 
     if (iso_write_ndef(p, file, (size_t)flen) != 0) {
-        fprintf(stderr, "write NDEF template failed\n"); pn7160_close(p); return 1;
+        fprintf(stderr, "write NDEF template failed\n"); nci_close(p); return 1;
     }
     printf("NDEF template written (ISO UpdateBinary, free write)\n");
 
     /* Re-select the NDEF application so native commands (auth,
      * ChangeFileSettings) target it again after the ISO EF selection. */
-    pn7160_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID);
+    nci_desfire_select_iso_df(p, NDEF_AID, sizeof NDEF_AID);
 
     /* Now authenticate to change the file settings (Change access = key 0). */
-    if (pn7160_desfire_authenticate(p, 0, app_key) != PN7160_OK) {
+    if (nci_desfire_authenticate(p, 0, app_key) != NCI_OK) {
         fprintf(stderr, "auth key0 failed (status 0x%02X) - is the app master key set?\n",
-                pn7160_desfire_last_status(p));
-        pn7160_close(p); return 1;
+                nci_desfire_last_status(p));
+        nci_close(p); return 1;
     }
     printf("authenticated (app master key 0)\n");
 
     /* 2) build SDM settings: encrypted PICCData (UID+ctr) + truncated CMAC,
      *    ASCII mirroring, no SDMENCFileData. MetaRead+FileRead = key 1.
      *    MAC input range is empty (input offset == mac offset). */
-    hci_sdm_settings s;
+    nci_sdm_settings s;
     memset(&s, 0, sizeof s);
     s.sdm_options       = 0xC1;     /* UID + ReadCtr present, ASCII encoding   */
     s.sdm_access_rights = (uint16_t)((SDM_KEY_NO << 12) | (SDM_KEY_NO << 8) | 0xFF);
@@ -296,8 +296,8 @@ int main(int argc, char **argv)
     s.sdm_mac_input_offset  = mac_off;   /* == mac offset -> empty CMAC input   */
     s.sdm_mac_offset        = mac_off;
     uint8_t sdm[32];
-    int sdm_len = hci_sdm_encode_settings(&s, sdm, sizeof sdm);
-    if (sdm_len < 0) { fprintf(stderr, "encode settings failed\n"); pn7160_close(p); return 1; }
+    int sdm_len = nci_sdm_encode_settings(&s, sdm, sizeof sdm);
+    if (sdm_len < 0) { fprintf(stderr, "encode settings failed\n"); nci_close(p); return 1; }
 
     uint8_t file_option = 0x40;          /* SDM on, comm plain                 */
     uint16_t access_rights = 0xE000;     /* Read=free, Write/RW/Change=key0    */
@@ -315,22 +315,22 @@ int main(int argc, char **argv)
      *    one. Cross-key change while authed as the master, so the session
      *    survives. Default (sdm_key == old_sdm_key == zero) skips this. */
     if (memcmp(sdm_key, old_sdm_key, 16) != 0) {
-        if (pn7160_desfire_change_key(p, SDM_KEY_NO, old_sdm_key, sdm_key, 0x01)
-            != PN7160_OK) {
+        if (nci_desfire_change_key(p, SDM_KEY_NO, old_sdm_key, sdm_key, 0x01)
+            != NCI_OK) {
             fprintf(stderr, "ChangeKey(key %u) failed (status 0x%02X)\n",
-                    SDM_KEY_NO, pn7160_desfire_last_status(p));
-            pn7160_close(p); return 1;
+                    SDM_KEY_NO, nci_desfire_last_status(p));
+            nci_close(p); return 1;
         }
         printf("rotated SDM key (key %u)\n", SDM_KEY_NO);
     }
 
     /* 5) enable SDM. Keep Read free so phones can tap; Write/Change via key 0. */
-    if (pn7160_desfire_change_file_settings(p, PN7160_DESFIRE_FULL, NDEF_FILE_NO,
+    if (nci_desfire_change_file_settings(p, NCI_DESFIRE_FULL, NDEF_FILE_NO,
                                             file_option, access_rights,
-                                            sdm, (size_t)sdm_len) != PN7160_OK) {
+                                            sdm, (size_t)sdm_len) != NCI_OK) {
         fprintf(stderr, "ChangeFileSettings(SDM) failed (status 0x%02X)\n",
-                pn7160_desfire_last_status(p));
-        pn7160_close(p); return 1;
+                nci_desfire_last_status(p));
+        nci_close(p); return 1;
     }
     printf("SDM enabled on NDEF file\n");
 
@@ -340,6 +340,6 @@ int main(int argc, char **argv)
     printf("%s\n", v == 0 ? "SUN provisioning OK" :
            "SUN provisioning wrote settings but verification FAILED (see above)");
 
-    pn7160_close(p);
+    nci_close(p);
     return v == 0 ? 0 : 1;
 }

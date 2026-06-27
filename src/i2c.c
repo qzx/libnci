@@ -25,15 +25,15 @@
 #define I2C_READ_RETRIES 8
 #define I2C_RETRY_US     200
 
-struct pn7160_i2c {
+struct nci_i2c {
     int      fd;
     uint16_t addr;
 };
 
-pn7160_i2c *pn7160_i2c_open(const char *bus, uint16_t addr)
+nci_i2c *nci_i2c_open(const char *bus, uint16_t addr)
 {
     if (!bus) return NULL;
-    pn7160_i2c *i = calloc(1, sizeof *i);
+    nci_i2c *i = calloc(1, sizeof *i);
     if (!i) return NULL;
     i->addr = addr;
 
@@ -54,20 +54,20 @@ pn7160_i2c *pn7160_i2c_open(const char *bus, uint16_t addr)
     return i;
 }
 
-void pn7160_i2c_close(pn7160_i2c *i)
+void nci_i2c_close(nci_i2c *i)
 {
     if (!i) return;
     if (i->fd >= 0) close(i->fd);
     free(i);
 }
 
-int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len)
+int nci_i2c_write(nci_i2c *i, const uint8_t *buf, size_t len)
 {
     if (!i || i->fd < 0) return -1;
     int eremoteio = 0;
     for (;;) {
         ssize_t n = write(i->fd, buf, len);
-        if (n >= 0) { pn7160_log_hex_at(PN7160_LOG_BYTES, "i2c>", buf, (size_t)n); return (int)n; }
+        if (n >= 0) { nci_log_hex_at(NCI_LVL_BYTES, "i2c>", buf, (size_t)n); return (int)n; }
         if (errno == EINTR || errno == EAGAIN) continue;
         /* The PN7160 transiently NAKs a write too (e.g. just after a state
          * change); retry briefly as on the read path before giving up. */
@@ -81,13 +81,13 @@ int pn7160_i2c_write(pn7160_i2c *i, const uint8_t *buf, size_t len)
     }
 }
 
-int pn7160_i2c_read(pn7160_i2c *i, uint8_t *buf, size_t len)
+int nci_i2c_read(nci_i2c *i, uint8_t *buf, size_t len)
 {
     if (!i || i->fd < 0) return -1;
     int eremoteio = 0;
     for (;;) {
         ssize_t n = read(i->fd, buf, len);
-        if (n >= 0) { pn7160_log_hex_at(PN7160_LOG_BYTES, "i2c<", buf, (size_t)n); return (int)n; }
+        if (n >= 0) { nci_log_hex_at(NCI_LVL_BYTES, "i2c<", buf, (size_t)n); return (int)n; }
         if (errno == EINTR || errno == EAGAIN) continue;
         if (errno == EREMOTEIO && eremoteio++ < I2C_READ_RETRIES) {
             struct timespec ts = { 0, I2C_RETRY_US * 1000L };
