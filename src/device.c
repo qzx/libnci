@@ -24,6 +24,7 @@
 #include "desfire_ev3.h"
 #include "desfire_legacy.h"
 #include "desfire_lrp.h"
+#include "desfire_dam.h"
 #include "crypto.h"
 #include "log.h"
 
@@ -940,6 +941,27 @@ int pn7160_desfire_proximity_check(pn7160 *p, const uint8_t pc_key[16],
     if (card_mac) memcpy(card_mac, rx, 8);
     if (resp_time) *resp_time = (uint16_t)((prt0 << 8) | prt1);
     return PN7160_OK;
+}
+
+/* CreateDelegatedApplication (#101). Requires an active EV2 session
+ * authenticated with the DAMAuthKey (key 0x10). DAM/dst keys are AES-128. */
+int pn7160_desfire_dam_create(pn7160 *p, uint32_t aid, uint16_t dam_slot,
+                              uint8_t slot_ver, uint16_t quota, uint8_t ks1, uint8_t ks2,
+                              const uint8_t dam_enc_key[16], const uint8_t dam_mac_key[16],
+                              const uint8_t dst_key[16], uint8_t dst_key_ver)
+{
+    if (!p || !p->ev2.active) return PN7160_ERR;
+    uint8_t appdata[16], contdata[48]; size_t alen = 0, clen = 0;
+    desfire_dam_build(aid, dam_slot, slot_ver, quota, ks1, ks2,
+                      dam_enc_key, dam_mac_key, dst_key, dst_key_ver,
+                      appdata, &alen, contdata, &clen);
+    return desfire_dam_create(facade_apdu, p, &p->ev2, appdata, alen, contdata, clen);
+}
+
+int pn7160_desfire_dam_get_info(pn7160 *p, uint16_t dam_slot, uint8_t out[8])
+{
+    if (!p || !p->ev2.active) return PN7160_ERR;
+    return desfire_dam_get_info(facade_apdu, p, &p->ev2, dam_slot, out);
 }
 
 int pn7160_desfire_authenticate(pn7160 *p, uint8_t key_no, const uint8_t key[16])

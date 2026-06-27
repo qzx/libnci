@@ -18,7 +18,8 @@ hcinfc_sources = [
   'src/nci.c', 'src/chipset.c', 'src/chips/pn7160.c', 'src/device.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
-  'src/desfire_lrp.c', 'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c',
+  'src/desfire_lrp.c', 'src/desfire_dam.c',
+  'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c',
 ]
 
 hcinfc_lib = static_library('hcinfc',
@@ -37,7 +38,8 @@ pn7160_dep = hcinfc_dep
 # --- demo / CLI apps -------------------------------------------------------
 foreach app : ['nfc-detect', 'nfc-read-ndef', 'desfire-info', 'desfire-auth',
                'desfire-manage', 'desfire-ev3-test', 'desfire-session-test',
-               'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision']
+               'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision',
+               'desfire-dam']
   executable(app, 'apps' / (app + '.c'),
     include_directories: inc_public,
     link_with: hcinfc_lib,

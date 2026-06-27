@@ -98,6 +98,18 @@ int pn7160_desfire_authenticate_legacy(pn7160 *p, uint8_t key_no,
 int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
                                     const uint8_t *key, size_t key_len);
 
+/* ---- Delegated Application Management (impl.txt #101) ----------------- *
+ * A third party holding the DAM keys creates an application in a DAM slot.
+ * CreateDelegatedApplication needs an active EV2 session authenticated with the
+ * DAMAuthKey (key 0x10). All keys AES-128. */
+int pn7160_desfire_dam_create(pn7160 *p, uint32_t aid, uint16_t dam_slot,
+                              uint8_t slot_ver, uint16_t quota, uint8_t ks1, uint8_t ks2,
+                              const uint8_t dam_enc_key[16], const uint8_t dam_mac_key[16],
+                              const uint8_t dst_key[16], uint8_t dst_key_ver);
+/* GetDelegatedInfo (0x69): 8-byte info for a DAM slot (DAMSlotVersion, free
+ * blocks, AID at offset 5). Requires a session. */
+int pn7160_desfire_dam_get_info(pn7160 *p, uint16_t dam_slot, uint8_t out[8]);
+
 /* Proximity Check (impl.txt #100): anti-relay distance bounding. Run after an
  * EV2 auth; `pc_key` is the 16-byte VC/PC key (0x20-0x23; default all-zero).
  * Returns PN7160_OK when the card accepts the reader's VerifyPC MAC (the check
