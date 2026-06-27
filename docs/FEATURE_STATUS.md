@@ -203,10 +203,14 @@ byte-for-byte intact.
 |---|---------|--------|-------|
 | 75 | EV2First + secure messaging | ✅hw | `desfire_ev2_*` |
 | 76 | AuthenticateEV2NonFirst | ✅hw | `pn7160_desfire_authenticate_nonfirst`; live: re-auth mid-session, UID matches |
-| 77 | AuthenticateLegacy (3DES) | ⬜ | needs DES/2K3DES crypto + the legacy CBC-send handshake; deferred |
-| 78 | AuthenticateISO (3DES) | ⬜ | as #77 (0x1A ISO variant); deferred |
-| 79 | Large data chaining | 🟡 | offset-chunked read/write works for StandardData; native `0xAF` response continuation (record files / single large reads) still todo - `desfire_ev2_transact` treats AF as terminal |
-| 80–84 | Value files (create/get/credit/debit/limited) | ✅hw | validated on a real EV3: arithmetic 100→150→120→125 exact |
+| 77 | AuthenticateLegacy (3DES) | ✅hw | `pn7160_desfire_authenticate_legacy` (0x0A, D40 decrypt-as-cipher); live on a 2K3DES app key. `src/desfire_legacy.c` + `crypto_3des_cbc` |
+| 78 | AuthenticateISO (3DES) | ✅hw | `pn7160_desfire_authenticate_iso` (0x1A, standard 3DES CBC, running IV); live on a 2K3DES app key (also handles 3K3DES, key_len 24) |
+| 79 | Large data chaining | ✅hw | native `0xAF` response continuation in `desfire_ev2_transact`; live: 256-byte StandardData read reassembled across frames. Large writes use offset chunking |
+| 80 | CreateValueFile | ✅hw | validated on a real EV3 |
+| 81 | ReadValue | ✅hw | validated |
+| 82 | Credit | ✅hw | validated |
+| 83 | Debit | ✅hw | `pn7160_desfire_debit`; re-validated standalone: 1000 +500 −300 = 1200 |
+| 84 | LimitedCredit | ✅hw | validated |
 | 85–89 | Record files (create/read/write/clear) | ✅hw | linear + cyclic create/write/read/clear validated |
 | 90 | CreateBackupDataFile | ✅hw | create/write/commit/read validated |
 | 91–92 | Commit / Abort transaction | ✅hw | abort rollback verified (AA preserved over uncommitted BB) |
@@ -225,8 +229,10 @@ The TMAC suite (#97-99) is the EV3 differentiator and is validated live: a
 TransactionMAC file makes the card emit a MAC over every committed transaction;
 CommitReaderID binds a reader identity. The EV3 commands reuse the already-tested
 `desfire_ev2_transact` for MAC/full comm; only the command-data byte layouts are
-new. Deferred this round: #77/#78 (legacy 3DES auth - needs DES crypto),
-#100 (RF-timed proximity), #101 (DAM), #103 (LRP).
+new. Legacy/ISO 3DES auth (#77/#78) and native AF response chaining (#79) are
+now done and validated on hardware (DES/3DES via `crypto_3des_cbc`, handshakes in
+`src/desfire_legacy.c`). Still deferred: #100 (RF-timed proximity, needs NFCC
+support), #101 (DAM), #103 (LRP - AN12304 + irreversible).
 
 ## 10. NFC-DEP / P2P  · 11. HCE
 | # | Feature | Status |

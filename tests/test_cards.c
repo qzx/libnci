@@ -7,6 +7,7 @@
 #include "t4t.h"
 #include "mifare.h"
 #include "mfc_ndef.h"
+#include "crypto.h"
 #include "desfire.h"
 #include "desfire_ev3.h"
 #include "pn7160/ndef.h"
@@ -307,9 +308,35 @@ static void test_mfc_ndef(void)
     printf("  mfc_ndef: OK (MAD CRC, write/read round trip, format)\n");
 }
 
+static void test_3des(void)
+{
+    /* Classic single-DES known-answer (weak key 01..01); our 3DES path expands
+     * an 8-byte key to EDE2 K||K, which equals single DES. */
+    uint8_t key8[8] = { 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01 };
+    uint8_t pt[8]   = { 0x95,0xF8,0xA5,0xE5,0xDD,0x31,0xD9,0x00 };
+    static const uint8_t exp[8] = { 0x80,0,0,0,0,0,0,0 };
+    uint8_t iv[8] = {0}, ct[8], back[8];
+    assert(crypto_3des_cbc(key8, 8, iv, pt, 8, ct, 1) == 0);
+    assert(memcmp(ct, exp, 8) == 0);
+    memset(iv, 0, 8);
+    assert(crypto_3des_cbc(key8, 8, iv, ct, 8, back, 0) == 0);
+    assert(memcmp(back, pt, 8) == 0);
+    /* 2K3DES round-trip with a real 16-byte key + nonzero IV. */
+    uint8_t k16[16]; for (int i = 0; i < 16; i++) k16[i] = (uint8_t)(0x10 + i);
+    uint8_t iv2[8] = { 1,2,3,4,5,6,7,8 }, in[16], c[16], r[16];
+    for (int i = 0; i < 16; i++) in[i] = (uint8_t)i;
+    uint8_t ivc[8]; memcpy(ivc, iv2, 8);
+    assert(crypto_3des_cbc(k16, 16, ivc, in, 16, c, 1) == 0);
+    memcpy(ivc, iv2, 8);
+    assert(crypto_3des_cbc(k16, 16, ivc, c, 16, r, 0) == 0);
+    assert(memcmp(r, in, 16) == 0);
+    printf("  3des: OK (DES KAT + 2K3DES round trip)\n");
+}
+
 int main(void)
 {
     printf("test_cards:\n");
+    test_3des();
     test_t4t_ndef_read();
     test_ndef_parse_uri();
     test_ndef_parse_text();

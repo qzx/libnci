@@ -17,7 +17,7 @@ hcinfc_sources = [
   'src/gpio.c', 'src/i2c.c', 'src/transport.c',
   'src/nci.c', 'src/chipset.c', 'src/chips/pn7160.c', 'src/device.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
-  'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c',
+  'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c',
 ]
 

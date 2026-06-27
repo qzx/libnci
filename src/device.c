@@ -22,6 +22,7 @@
 #include "desfire.h"
 #include "desfire_ev2.h"
 #include "desfire_ev3.h"
+#include "desfire_legacy.h"
 #include "log.h"
 
 #include <pthread.h>
@@ -39,6 +40,7 @@ struct hci_dev {
     nci_device_info     info;
     nci_rf_conn         conn;     /* RF data connection for transceive        */
     desfire_ev2_session ev2;      /* DESFire/NTAG 424 secure session, if any   */
+    desfire_legacy_session legacy;/* DES/3DES legacy/ISO auth session, if any  */
     uint8_t             last_status;
     uint32_t            tech_mask;
     nci_disc_target     targets[MAX_TARGETS];
@@ -833,6 +835,22 @@ int pn7160_desfire_authenticate_nonfirst(pn7160 *p, uint8_t key_no,
 {
     if (!p || !p->ev2.active) return PN7160_ERR;
     return desfire_ev2_authenticate_nonfirst(facade_apdu, p, key_no, key, &p->ev2);
+}
+
+int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
+                                    const uint8_t *key, size_t key_len)
+{
+    if (!p || !pn7160_tag_supports_apdu(p)) return PN7160_ERR;
+    p->ev2.active = false;   /* legacy auth establishes its own (non-EV2) channel */
+    return desfire_auth_iso(facade_apdu, p, key_no, key, key_len, &p->legacy);
+}
+
+int pn7160_desfire_authenticate_legacy(pn7160 *p, uint8_t key_no,
+                                       const uint8_t *key, size_t key_len)
+{
+    if (!p || !pn7160_tag_supports_apdu(p)) return PN7160_ERR;
+    p->ev2.active = false;
+    return desfire_auth_legacy(facade_apdu, p, key_no, key, key_len, &p->legacy);
 }
 
 int pn7160_desfire_authenticate(pn7160 *p, uint8_t key_no, const uint8_t key[16])

@@ -15,6 +15,7 @@
 
 #define AES_BLOCK 16
 #define AES_KEY_LEN 16
+#define DES_BLOCK 8
 
 /* AES-128-CBC, no padding. len must be a multiple of AES_BLOCK. iv (16 B) is
  * the starting IV; it is NOT modified. out may alias in. */
@@ -30,6 +31,17 @@ int crypto_aes_ecb_encrypt(const uint8_t key[AES_KEY_LEN],
 /* AES-128-CMAC (RFC 4493). Full 16-byte tag. */
 int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
                     const uint8_t *data, size_t len, uint8_t out[AES_BLOCK]);
+
+/* (2K/3K)3DES-CBC, no padding. DES_BLOCK (8) aligned, IV not modified, out may
+ * alias in. keylen selects the cipher: 8 = single DES (expanded to EDE K||K),
+ * 16 = 2-key 3DES (EDE2), 24 = 3-key 3DES (EDE3). `enc` selects direction.
+ * Used by the DESFire legacy (0x0A) and ISO (0x1A) authentications. */
+int crypto_3des_cbc(const uint8_t *key, size_t keylen, const uint8_t iv[DES_BLOCK],
+                    const uint8_t *in, size_t len, uint8_t *out, int enc);
+
+/* CRC-16 (DESFire/ISO 14443-A, poly 0x8408, init 0x6363) over `data`. Used by
+ * legacy DESFire secure messaging. */
+uint16_t crypto_crc16_desfire(const uint8_t *data, size_t len);
 
 /* CRC-32 in the DESFire variant (CRC-32/JAMCRC: reflected, init 0xFFFFFFFF,
  * no final XOR). Used by ChangeKey. */

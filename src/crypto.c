@@ -84,6 +84,47 @@ out_mac:
     return rc;
 }
 
+int crypto_3des_cbc(const uint8_t *key, size_t keylen, const uint8_t iv[DES_BLOCK],
+                    const uint8_t *in, size_t len, uint8_t *out, int enc)
+{
+    if (len % DES_BLOCK != 0) { LOGE("crypto: 3des len %zu not 8-aligned", len); return -1; }
+    const EVP_CIPHER *cipher;
+    uint8_t k16[16];
+    const uint8_t *k = key;
+    if (keylen == 8) {                 /* single DES -> EDE with K1=K2=K */
+        memcpy(k16, key, 8); memcpy(k16 + 8, key, 8);
+        k = k16; cipher = EVP_des_ede_cbc();
+    } else if (keylen == 16) {
+        cipher = EVP_des_ede_cbc();    /* 2-key 3DES (EDE2) */
+    } else if (keylen == 24) {
+        cipher = EVP_des_ede3_cbc();   /* 3-key 3DES (EDE3) */
+    } else {
+        LOGE("crypto: bad 3des keylen %zu", keylen); return -1;
+    }
+    EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
+    if (!c) return -1;
+    int rc = -1, outl = 0, fin = 0;
+    if (EVP_CipherInit_ex(c, cipher, NULL, k, iv, enc) != 1) goto out;
+    EVP_CIPHER_CTX_set_padding(c, 0);
+    if (EVP_CipherUpdate(c, out, &outl, in, (int)len) != 1) goto out;
+    if (EVP_CipherFinal_ex(c, out + outl, &fin) != 1) goto out;
+    rc = 0;
+out:
+    EVP_CIPHER_CTX_free(c);
+    return rc;
+}
+
+uint16_t crypto_crc16_desfire(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0x6363;             /* ISO 14443-A / DESFire CRC-16 */
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = data[i] ^ (uint8_t)(crc & 0xFF);
+        b ^= (uint8_t)(b << 4);
+        crc = (uint16_t)((crc >> 8) ^ ((uint16_t)b << 8) ^ ((uint16_t)b << 3) ^ (b >> 4));
+    }
+    return crc;
+}
+
 uint32_t crypto_crc32_desfire(const uint8_t *data, size_t len)
 {
     uint32_t crc = 0xFFFFFFFFu;

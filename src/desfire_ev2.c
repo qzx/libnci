@@ -242,10 +242,25 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     if (enc_len) { memcpy(apdu_data + ad, enc_data, enc_len); ad += enc_len; }
     memcpy(apdu_data + ad, mact, 8); ad += 8;
 
-    uint8_t resp[512]; size_t rn = 0; uint8_t status = 0;
+    uint8_t resp[1024]; size_t rn = 0; uint8_t status = 0;
     if (desfire_apdu_raw(fn, ctx, ins, apdu_data, (uint8_t)ad,
                          resp, sizeof resp, &rn, &status) != PN7160_OK)
         return PN7160_ERR;
+
+    /* Native AF chaining (impl.txt #79): a response larger than one frame comes
+     * back as several frames, each ending 0x91AF, until the final 0x9100. Pull
+     * the continuations (Cmd 0xAF, no data) and concatenate; the single 8-byte
+     * response MAC rides the last frame, and the card counts the whole exchange
+     * as one command (one CmdCtr step), so MAC/IV handling below is unchanged. */
+    while (status == ST_AF) {
+        if (rn >= sizeof resp) { LOGE("ev2: chained response overflow"); return PN7160_ERR; }
+        size_t more = 0; uint8_t st2 = 0;
+        if (desfire_apdu_raw(fn, ctx, INS_ADDITIONAL, NULL, 0,
+                             resp + rn, sizeof resp - rn, &more, &st2) != PN7160_OK)
+            return PN7160_ERR;
+        rn += more;
+        status = st2;
+    }
 
     s->last_status = status;
     if (status != ST_OK) {
@@ -272,7 +287,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     const uint8_t *resp_mac = resp + enc_resp_len;
 
     /* Verify response MAC over RC(=00) | CmdCtr | TI | EncRespData. */
-    uint8_t rin[520]; size_t ri = 0;
+    uint8_t rin[1040]; size_t ri = 0;
     rin[ri++] = ST_OK; rin[ri++] = ctr_lo; rin[ri++] = ctr_hi;
     memcpy(rin + ri, s->ti, 4); ri += 4;
     if (enc_resp_len) { memcpy(rin + ri, resp, enc_resp_len); ri += enc_resp_len; }
@@ -289,7 +304,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         if (enc_resp_len % 16 != 0) { LOGE("ev2: resp not block-aligned"); return PN7160_ERR; }
         uint8_t ivr[16];
         if (build_iv(s, 0x5A, 0xA5, ivr) != 0) return PN7160_ERR;
-        uint8_t dec[512];
+        uint8_t dec[1024];
         if (crypto_aes_cbc_decrypt(s->ses_enc, ivr, resp, enc_resp_len, dec) != 0)
             return PN7160_ERR;
         produced = enc_resp_len < out_cap ? enc_resp_len : out_cap;

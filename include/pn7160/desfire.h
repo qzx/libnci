@@ -90,6 +90,14 @@ int pn7160_desfire_authenticate_ev2(pn7160 *p, uint8_t key_no, const uint8_t key
 int pn7160_desfire_authenticate_nonfirst(pn7160 *p, uint8_t key_no,
                                          const uint8_t key[16]);
 
+/* Legacy authentications for DES / 2K3DES / 3K3DES keys (impl.txt #77-78), on
+ * the currently selected application's key. key_len: 8 or 16 for legacy (0x0A),
+ * 16 or 24 for ISO (0x1A). Establish a (non-EV2) authenticated channel. */
+int pn7160_desfire_authenticate_legacy(pn7160 *p, uint8_t key_no,
+                                       const uint8_t *key, size_t key_len);
+int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
+                                    const uint8_t *key, size_t key_len);
+
 /* Recommended authentication entry point. Establishes a usable secure session
  * for subsequent metadata/file operations. Today this performs
  * AuthenticateEV2First (AES), the method used by DESFire EV2/EV3 and NTAG 424
