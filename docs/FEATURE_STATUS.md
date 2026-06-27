@@ -221,7 +221,7 @@ MAC/Full command exchange.
 | 85–89 | Record files (create/read/write/clear) | ✅hw | linear + cyclic create/write/read/clear validated |
 | 90 | CreateBackupDataFile | ✅hw | create/write/commit/read validated |
 | 91–92 | Commit / Abort transaction | ✅hw | abort rollback verified (AA preserved over uncommitted BB) |
-| 93 | GetISOFileIDs | 🟡 | command framing correct; this EV3 rejects ISO File IDs on files (LENGTH_ERROR), so there is nothing to enumerate here |
+| 93 | GetISOFileIDs | ✅ hw | `0x61` lists the ISO File IDs of files in the selected app. Hardware-validated in `desfire-ev3-test`: created an ISO-enabled app (KS2 ISO-FID bit) with EFs 0x1101/0x1102 → GetISOFileIDs returns exactly `1101 1102`. (Earlier 🟡 was a mistest - ISO File IDs only exist when the *app* is created ISO-enabled; a plain app has none to enumerate, which is correct, not a rejection.) |
 | 94–95 | Get/Change KeySettings | ✅hw | validated on a real EV3 |
 | 96 | GetApplicationIDs | ✅hw | `desfire_ev2_get_application_ids` (0x6A); live: enumerated app `000001` |
 | 97 | CommitReaderID | ✅hw | `pn7160_desfire_commit_reader_id` (0xC8, MAC mode); live: bound reader id, EncTMRI returned |

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #define TESTAID 0x00C0DE
+#define ISOAID  0x00F193          /* dedicated ISO-FID app for GetISOFileIDs (#93) */
 static volatile sig_atomic_t g_stop = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
 
@@ -127,9 +128,35 @@ static void run(void)
     CHECK(pn7160_desfire_get_key_settings(P, &ks, &mk), "GetKeySettings");
     EXPECT(ks == 0x0F, "key settings == 0x0F");
 
+    /* GetISOFileIDs (#93): an app must be created ISO-enabled (KS2 ISO-FID bit)
+     * for its files to carry 2-byte ISO File IDs; then 0x61 lists them. */
+    printf("[ISO file IDs, GetISOFileIDs #93]\n");
+    CHECK(pn7160_desfire_select_application(P, 0), "Select PICC");
+    CHECK(pn7160_desfire_authenticate_ev2(P, 0, KEY), "AuthEV2First (PICC master)");
+    pn7160_desfire_delete_application(P, ISOAID);     /* clear leftover */
+    if (!pn7160_desfire_session_active(P)) pn7160_desfire_authenticate_ev2(P, 0, KEY);
+    static const uint8_t ISODF[5] = {0xF1, 0x93, 0xD2, 0x76, 0x00};
+    CHECK(pn7160_desfire_create_application_iso(P, ISOAID, 0x0F,
+              PN7160_DESFIRE_KS2_AES | PN7160_DESFIRE_KS2_ISO_FIDS | 0x01, 0x40F1,
+              ISODF, sizeof ISODF), "CreateApplication (ISO FIDs)");
+    CHECK(pn7160_desfire_select_application(P, ISOAID), "Select ISO app");
+    CHECK(pn7160_desfire_authenticate_ev2(P, 0, KEY), "AuthEV2First (ISO app key 0)");
+    CHECK(pn7160_desfire_create_std_data_file(P, 1, 0x1101, PN7160_DESFIRE_PLAIN, 0xEEE0, 32),
+          "CreateStdDataFile EF 0x1101");
+    CHECK(pn7160_desfire_create_std_data_file(P, 2, 0x1102, PN7160_DESFIRE_PLAIN, 0xEEE0, 48),
+          "CreateStdDataFile EF 0x1102");
+    uint16_t isoids[16]; size_t ison = 0;
+    CHECK(pn7160_desfire_get_iso_file_ids(P, isoids, 16, &ison), "GetISOFileIDs");
+    printf("        ISO File IDs:"); for (size_t i = 0; i < ison; i++) printf(" %04X", isoids[i]);
+    printf("\n");
+    EXPECT(ison == 2 &&
+           ((isoids[0] == 0x1101 && isoids[1] == 0x1102) ||
+            (isoids[0] == 0x1102 && isoids[1] == 0x1101)), "GetISOFileIDs lists 1101,1102");
+
     printf("[cleanup]\n");
     CHECK(pn7160_desfire_select_application(P, 0), "Select PICC");
     CHECK(pn7160_desfire_authenticate_ev2(P, 0, KEY), "AuthEV2First (PICC master)");
+    CHECK(pn7160_desfire_delete_application(P, ISOAID), "DeleteApplication (ISO app)");
     CHECK(pn7160_desfire_delete_application(P, TESTAID), "DeleteApplication");
 
     printf("\n=== %d passed, %d failed ===\n", passes, fails);
