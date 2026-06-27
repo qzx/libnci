@@ -227,8 +227,8 @@ MAC/Full command exchange.
 | 97 | CommitReaderID | ✅hw | `pn7160_desfire_commit_reader_id` (0xC8, MAC mode); live: bound reader id, EncTMRI returned |
 | 98 | CreateTransactionMACFile | ✅hw | `pn7160_desfire_create_transaction_mac_file` (0xCE, Full; key enciphered) |
 | 99 | Read TransactionMAC file | ✅hw | `pn7160_desfire_read_transaction_mac`; live: TMC incremented 0→1 on commit, real TMV returned |
-| 100 | Proximity Check | ⬜ | needs NFCC RF-timing support (timed PC frames); not exposed by the PN7160 data path at this layer; deferred |
-| 101 | Delegated App Mgmt | ⬜ | issuer-delegated provisioning with encrypted DAM key; deferred (complex, needs issuer DAM keys to validate) |
+| 100 | Proximity Check | ⬜ blocked | this EV3 *supports* it (PreparePC 0xF0 → 0x0B precondition, ProximityCheck 0xF2 recognized) but the PreparePC/ProximityCheck/VerifyPC byte formats + the VerifyPC CMAC (key in the VC/PC range 0x20-0x23) are only in the DS4870xx datasheet (NDA). AN12752 defers to it. Can't ship/validate a MAC-protected protocol without the spec |
+| 101 | Delegated App Mgmt | ⬜ blocked | EV3 recognizes CreateDelegatedApplication (0xC9) / GetDelegatedInfo (0x69); DAM keys are 0x10-0x12. But the CreateDelegatedApplication layout + DAMMAC computation are only in DS4870xx (NDA); AN12752 defers to it. Also needs DAM quota provisioned on the PICC |
 | 102 | SetConfiguration ext | ✅hw | `pn7160_desfire_set_configuration` (0x5C, Full); same command as NTAG #70, executed live |
 | 103 | LRP mode | ✅hw | shared LRP implementation (`src/lrp.c`, `src/desfire_lrp.c`); crypto vector-validated and AuthenticateLRPFirst validated on a real tag in LRP mode (see NTAG #74) |
 
