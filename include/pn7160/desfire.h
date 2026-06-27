@@ -98,6 +98,14 @@ int pn7160_desfire_authenticate_legacy(pn7160 *p, uint8_t key_no,
 int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
                                     const uint8_t *key, size_t key_len);
 
+/* Proximity Check (impl.txt #100): anti-relay distance bounding. Run after an
+ * EV2 auth; `pc_key` is the 16-byte VC/PC key (0x20-0x23; default all-zero).
+ * Returns PN7160_OK when the card accepts the reader's VerifyPC MAC (the check
+ * passed). *resp_time gets the card's pubRespTime; card_mac (optional) gets the
+ * card's 8-byte response MAC. */
+int pn7160_desfire_proximity_check(pn7160 *p, const uint8_t pc_key[16],
+                                   uint16_t *resp_time, uint8_t card_mac[8]);
+
 /* AuthenticateLRPFirst for a tag in LRP mode (impl.txt #74/#103). Establishes
  * an LRP secure-messaging session with the 16-byte key of `key_no`. Enable LRP
  * first with pn7160_desfire_set_configuration(p, 0x05, {0,0,0,0,0x02,0,0,0,0,0},

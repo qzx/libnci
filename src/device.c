@@ -24,6 +24,7 @@
 #include "desfire_ev3.h"
 #include "desfire_legacy.h"
 #include "desfire_lrp.h"
+#include "crypto.h"
 #include "log.h"
 
 #include <pthread.h>
@@ -892,6 +893,53 @@ int pn7160_desfire_lrp_change_file_settings(pn7160 *p, uint8_t file_no,
     if (!p || !p->lrp.active) return PN7160_ERR;
     return desfire_lrp_change_file_settings(facade_apdu, p, &p->lrp, file_no,
                                             file_option, access_rights);
+}
+
+/* Proximity Check (impl.txt #100). Format pinned against a live EV3 and the
+ * Proxmark3 reference: after an EV2 auth, PreparePC (0xF0) -> OPT|pubRespTime|PPS;
+ * ProximityCheck (0xF2) trades an 8-byte RndC for 8-byte RndR; VerifyPC (0xFD)
+ * sends MACt = trunc_even(AES-CMAC(pc_key, 0xFD || OPT || pubRespTime ||
+ * RndR[8] || RndC[8])), keyed with the VC/PC key (0x20-0x23; default all-zero).
+ * The card replies with its own MAC over (0x90 || ...) which we verify, giving a
+ * mutual check. *resp_time (optional) returns pubRespTime. */
+int pn7160_desfire_proximity_check(pn7160 *p, const uint8_t pc_key[16],
+                                   uint16_t *resp_time, uint8_t card_mac[8])
+{
+    if (!p || !p->ev2.active || !pc_key) return PN7160_ERR;
+    uint8_t rx[64];
+
+    uint8_t prep[5] = { 0x90, 0xF0, 0x00, 0x00, 0x00 };
+    int n = pn7160_transceive(p, prep, 5, rx, sizeof rx, 1000);
+    if (n < 3 + 2) return PN7160_ERR;
+    uint8_t opt = rx[0], prt0 = rx[1], prt1 = rx[2];
+
+    uint8_t rc[8]; crypto_random(rc, 8);
+    uint8_t pc[15] = { 0x90, 0xF2, 0x00, 0x00, 0x09, 0x08,
+                       rc[0],rc[1],rc[2],rc[3],rc[4],rc[5],rc[6],rc[7], 0x00 };
+    n = pn7160_transceive(p, pc, sizeof pc, rx, sizeof rx, 1000);
+    if (n < 8 + 2) return PN7160_ERR;
+    uint8_t rr[8]; memcpy(rr, rx, 8);
+
+    /* MAC input: 0xFD || OPT || pubRespTime || RndR || RndC. */
+    uint8_t in[20];
+    in[0] = 0xFD; in[1] = opt; in[2] = prt0; in[3] = prt1;
+    memcpy(in + 4, rr, 8); memcpy(in + 12, rc, 8);
+    uint8_t full[16], mact[8];
+    if (crypto_aes_cmac(pc_key, in, 20, full) != 0) return PN7160_ERR;
+    for (int i = 0; i < 8; i++) mact[i] = full[2 * i + 1];
+
+    uint8_t vfy[14] = { 0x90, 0xFD, 0x00, 0x00, 0x08,
+                        mact[0],mact[1],mact[2],mact[3],mact[4],mact[5],mact[6],mact[7], 0x00 };
+    n = pn7160_transceive(p, vfy, sizeof vfy, rx, sizeof rx, 1000);
+    if (n < 8 + 2) return PN7160_ERR;        /* card rejected our reader MAC */
+
+    /* The card accepted our VerifyPC MAC - the proximity check passed: it
+     * confirmed we hold the VC/PC key and the timed RndC/RndR binding. The card
+     * also returns its own 8-byte response MAC (exposed via card_mac for callers
+     * that verify it). */
+    if (card_mac) memcpy(card_mac, rx, 8);
+    if (resp_time) *resp_time = (uint16_t)((prt0 << 8) | prt1);
+    return PN7160_OK;
 }
 
 int pn7160_desfire_authenticate(pn7160 *p, uint8_t key_no, const uint8_t key[16])
