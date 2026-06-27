@@ -105,6 +105,16 @@ int pn7160_desfire_authenticate_iso(pn7160 *p, uint8_t key_no,
 int pn7160_desfire_authenticate_lrp(pn7160 *p, uint8_t key_no, const uint8_t key[16]);
 bool pn7160_desfire_lrp_active(pn7160 *p);
 
+/* Commands under an active LRP session (comm = PN7160_DESFIRE_MAC/FULL). */
+int pn7160_desfire_lrp_get_card_uid(pn7160 *p, uint8_t uid[7]);
+int pn7160_desfire_lrp_read_data(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                 uint32_t offset, uint32_t length,
+                                 uint8_t *out, size_t out_cap, size_t *out_len);
+int pn7160_desfire_lrp_write_data(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                  uint32_t offset, const uint8_t *data, uint32_t len);
+int pn7160_desfire_lrp_change_file_settings(pn7160 *p, uint8_t file_no,
+                                            uint8_t file_option, uint16_t access_rights);
+
 /* Recommended authentication entry point. Establishes a usable secure session
  * for subsequent metadata/file operations. Today this performs
  * AuthenticateEV2First (AES), the method used by DESFire EV2/EV3 and NTAG 424

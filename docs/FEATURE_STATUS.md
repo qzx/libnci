@@ -193,16 +193,17 @@ byte-for-byte intact.
 | 71 | **SDM SUN decode** | ✅hw | `hci_sdm_decrypt_picc`, `hci_sdm_verify`; real tag UID recovered |
 | 72 | **SDM CMAC verify** | ✅hw | `hci_sdm_mac` truncated-CMAC; VALID on live taps |
 | 73 | **SDM EncFileData decrypt** | ✅ | `hci_sdm_decrypt_file_data` (test_sdm; not exercised by this tag's config) |
-| 74 | LRP mode auth | ✅hw | full LRP stack in `src/lrp.c` (AN12304: genkeys, evalLRP, LRP-CMAC, LRICB) + `src/desfire_lrp.c` (AuthenticateLRPFirst). Crypto validated against the AN12304 KATs (`test_lrp`); auth validated on a tag switched to LRP mode |
+| 74 | LRP mode (auth + secure messaging) | ✅hw | `src/lrp.c` (AN12304: genkeys, evalLRP, LRP-CMAC, LRICB) + `src/desfire_lrp.c` (AuthenticateLRPFirst **and** the command layer: LRP-CMAC MAC + LRICB Full). Crypto KAT-validated (`test_lrp`); on a real LRP tag: auth, GetCardUID (real UID), ChangeFileSettings, and a WriteData→ReadData round-trip all under LRP |
 
 `ntag424-sdm` CLI verifies a scanned SUN URL offline (UID + counter + MAC + enc data).
 #63-74 are complete. LRP: `src/lrp.c` is unit-tested against every AN12304 test
 vector (secret plaintexts/updated keys, ~8 evalLRP, 6 LRP-CMAC, 4 LRICB); on a
 sacrificial tag, SetConfiguration(0x05) switched it to LRP mode (AES auth then
-refused) and AuthenticateLRPFirst established a session - proving the primitive,
-CMAC, session-key derivation and LRICB response decryption against real silicon.
-Remaining LRP work: the command-layer secure messaging (MAC/Full reads & writes
-under an LRP session) on top of the validated session keys.
+refused), AuthenticateLRPFirst established a session, and the command layer
+(`desfire_lrp_transact`) ran GetCardUID (returning the real UID), ChangeFileSettings,
+and a WriteData→ReadData round-trip - all under LRP secure messaging, against
+real silicon. LRP is complete: primitive, CMAC, LRICB, session keys, auth, and
+MAC/Full command exchange.
 
 ## 9. DESFire EV3
 | # | Feature | Status | Where |

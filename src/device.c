@@ -864,6 +864,36 @@ int pn7160_desfire_authenticate_lrp(pn7160 *p, uint8_t key_no, const uint8_t key
 
 bool pn7160_desfire_lrp_active(pn7160 *p) { return p && p->lrp.active; }
 
+int pn7160_desfire_lrp_get_card_uid(pn7160 *p, uint8_t uid[7])
+{
+    if (!p || !p->lrp.active) return PN7160_ERR;
+    return desfire_lrp_get_card_uid(facade_apdu, p, &p->lrp, uid);
+}
+
+int pn7160_desfire_lrp_read_data(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                 uint32_t offset, uint32_t length,
+                                 uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!p || !p->lrp.active) return PN7160_ERR;
+    return desfire_lrp_read_data(facade_apdu, p, &p->lrp, comm, file_no, offset,
+                                 length, out, out_cap, out_len);
+}
+
+int pn7160_desfire_lrp_write_data(pn7160 *p, uint8_t comm, uint8_t file_no,
+                                  uint32_t offset, const uint8_t *data, uint32_t len)
+{
+    if (!p || !p->lrp.active) return PN7160_ERR;
+    return desfire_lrp_write_data(facade_apdu, p, &p->lrp, comm, file_no, offset, data, len);
+}
+
+int pn7160_desfire_lrp_change_file_settings(pn7160 *p, uint8_t file_no,
+                                            uint8_t file_option, uint16_t access_rights)
+{
+    if (!p || !p->lrp.active) return PN7160_ERR;
+    return desfire_lrp_change_file_settings(facade_apdu, p, &p->lrp, file_no,
+                                            file_option, access_rights);
+}
+
 int pn7160_desfire_authenticate(pn7160 *p, uint8_t key_no, const uint8_t key[16])
 {
     /* Single negotiation entry point. AuthenticateEV2First (AES) is the method
