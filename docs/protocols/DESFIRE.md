@@ -339,7 +339,7 @@ an application in a DAM slot. The cryptogram and DAMMAC are built clean-room
 > PICC-master session, and the keys can't be changed without knowing them. The
 > command format/crypto/CLI are complete and Proxmark3-verified; validating
 > *create* needs a card personalised with known DAM keys. See
-> `reference/PC_DAM_REVERSE_ENGINEERING.md`.
+> [`../PC_DAM_REVERSE_ENGINEERING.md`](../PC_DAM_REVERSE_ENGINEERING.md).
 
 ---
 
