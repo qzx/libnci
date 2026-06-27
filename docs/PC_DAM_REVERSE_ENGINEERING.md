@@ -153,3 +153,37 @@ expendable/irreversible.
 - NXP AN12752 (EV3 feature comparison), AN12753 (EV3 quick start), AN12696 (SAM AV3 for DESFire), AN12304 (LRP)
 - NXP MF3D(H)x3 / MF3D(H)x2 short datasheets; DS4870xx full datasheet (NDA, DAM in ch. 6.6.2)
 - NXP community: "how to create delegate application in desfire ev2"
+
+---
+
+## FINAL EMPIRICAL FINDING — DAM is gated by NXP's proprietary keys (2026-06-27)
+
+After porting the full CreateDelegatedApplication algorithm from Proxmark3 and
+building the `desfire-dam` CLI, live testing on the EV3 (uid 0465A2B28B7180)
+settled the question definitively:
+
+| Probe (fresh card) | Result |
+|---|---|
+| `GetDelegatedInfo` slot 0001 | **works** → 0xA0 (slot not provisioned) |
+| Plain C9+AF create (no auth) | C9→AF, AF→**0xAE** (auth required) |
+| AuthEV2First / ISO / legacy / AES on key 0x10 | **0x9D PERMISSION_DENIED**, every method |
+| Same, *inside* a valid PICC-master (key 0) session | still **0x9D** |
+| Key 0x00 ISO-2TDEA (control) | 0xAE (correct: PICC master is AES) |
+
+The card refuses to even *begin* DAMAuthKey authentication (0x9D, before any
+RndB), regardless of crypto method or session state. This is **not** the EV1
+secure-messaging gap hypothesised earlier — that hypothesis is superseded.
+
+The MF3Dx3 datasheet explains it: the DAM keys are *"Factory loaded NXP's DAM
+keys for AppXplorer service support"* and AppXplorer is listed as *"preloaded
+DAM keys"*. **The DAM keys are NXP-proprietary** (their AppXplorer service,
+NDA/commercial). They cannot be authenticated with public keys, and cannot be
+changed without knowing them (ChangeKey of a *different* key encrypts
+newKey⊕oldKey, so the old NXP key is required).
+
+**Conclusion for #101:** the command format, cryptogram (AES-CBC under DAMEncKey),
+DAMMAC (trunc-even AES-CMAC under DAMMACKey) and the CLI are complete and
+Proxmark3-verified; `GetDelegatedInfo` is hardware-validated. `CreateDelegatedApplication`
+is **un-validatable on a standard factory card** — it requires a card
+personalised with known DAM keys via the NXP AppXplorer service. This is a
+key-secrecy boundary, not a missing transport.

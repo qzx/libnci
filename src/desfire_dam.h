@@ -11,6 +11,13 @@
  *   DAMMAC     = trunc_even(AES-CMAC(DAMMACKey, 0xC9 || appdata || cryptogram))[0..7]
  *   command    = C9<appdata> + AF<cryptogram||DAMMAC>, MACed under an EV2 session
  *                authenticated with DAMAuthKey (key 0x10).
+ *
+ * NOTE on factory cards: per the MF3Dx3 datasheet the DAM keys are "Factory
+ * loaded NXP's DAM keys for AppXplorer service support" - i.e. NXP-proprietary.
+ * On such a card AuthenticateFirst(key 0x10) is denied 0x9D PERMISSION_DENIED by
+ * any method, in any session state, so CreateDelegatedApplication can only be
+ * exercised on a card personalised with known DAM keys (NXP AppXplorer service).
+ * GetDelegatedInfo needs only an ordinary session and works on any card.
  */
 #ifndef PN7160_DESFIRE_DAM_H
 #define PN7160_DESFIRE_DAM_H
