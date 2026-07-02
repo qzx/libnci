@@ -410,8 +410,18 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 {
     if (!s) return NCI_ERR;
     bool dec = (comm == DF_COMM_FULL);
-    if (length == 0)   /* whole file in one go (caller-bounded by out_cap) */
-        return read_one(fn, ctx, s, comm, file_no, offset, 0, out, out_cap, out_len);
+    if (length == 0) {
+        /* Whole file: a single ReadData can't follow the 0xAF multi-frame continuation under the
+         * session, so learn the size from GetFileSettings and read it in frame-sized chunks (the
+         * path below). Standard/backup data file settings are [type][comm][access:2][size:3 LE].
+         * For files with no size field, fall back to the best-effort single read. */
+        uint8_t fs[33]; size_t fsn = 0;
+        if (desfire_ev2_get_file_settings(fn, ctx, s, file_no, fs, sizeof fs, &fsn) == NCI_OK
+            && fsn >= 7 && (fs[0] == 0x00 || fs[0] == 0x01))
+            length = (uint32_t)fs[4] | ((uint32_t)fs[5] << 8) | ((uint32_t)fs[6] << 16);
+        if (length == 0)
+            return read_one(fn, ctx, s, comm, file_no, offset, 0, out, out_cap, out_len);
+    }
 
     /* Split into frame-sized reads at successive offsets. */
     size_t chunk = frame_data_chunk(s->frame_size, dec);

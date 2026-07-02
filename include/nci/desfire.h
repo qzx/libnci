@@ -222,6 +222,16 @@ int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
                                   uint32_t offset, uint32_t length, uint8_t *out,
                                   size_t out_cap, size_t *out_len);
 
+/* Turn a blank DESFire (EV2/EV3) into an NFC Forum Type 4 NDEF tag in one call:
+ * (re)create the NDEF application D2760000850101 with its CC (E103) and NDEF
+ * (E104) files, write the Capability Container (read-only to phones), and write
+ * a single URI record for `url` (pass NULL/"" for an empty NDEF). `key` is the
+ * PICC master AES key (NULL = factory all-zero). ndef_size is the NDEF file size
+ * (16..0x7FFF) - oversize it to leave room for later SDM/SUN mirrors. The NDEF
+ * app's key 0 is left all-zero. Returns NCI_OK or NCI_ERR. */
+int nci_desfire_format_ndef(nci *p, const uint8_t key[16], const char *url,
+                            uint32_t ndef_size);
+
 /* Keys. ChangeKey on the authenticated key ends the session. */
 int nci_desfire_get_key_version(nci *p, uint8_t key_no, uint8_t *version);
 int nci_desfire_change_key(nci *p, uint8_t key_no, const uint8_t old_key[16],

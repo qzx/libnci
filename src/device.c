@@ -16,6 +16,7 @@
 #include "gpio.h"
 #include "nci.h"
 #include "t4t.h"
+#include "nci/ndef.h"
 #include "mifare.h"
 #include "mfc_ndef.h"
 #include "nci/mifare.h"
@@ -1089,6 +1090,54 @@ int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
     EV2_GUARD(p);
     return desfire_ev2_read_data(facade_apdu, p, &p->ev2, comm, file_no, offset,
                                  length, out, out_cap, out_len);
+}
+
+int nci_desfire_format_ndef(nci *p, const uint8_t key[16], const char *url,
+                            uint32_t ndef_size)
+{
+    static const uint8_t NDEF_DF[7] = { 0xD2,0x76,0x00,0x00,0x85,0x01,0x01 };
+    const uint32_t NDEF_AID = 0x000001;
+    uint8_t zero[16] = {0};
+    if (!p) return NCI_ERR;
+    if (!key) key = zero;
+    if (ndef_size < 16 || ndef_size > 0x7FFF) return NCI_ERR;
+
+    /* PICC: authenticate, drop any prior NDEF app, recreate it with the ISO-FID
+     * bit set so its files can carry the E103/E104 file ids a Type 4 tag needs. */
+    nci_desfire_select_application(p, 0x000000);
+    if (nci_desfire_authenticate(p, 0, key) != NCI_OK) return NCI_ERR;
+    nci_desfire_delete_application(p, NDEF_AID);
+    if (!nci_desfire_session_active(p) &&
+        nci_desfire_authenticate(p, 0, key) != NCI_OK) return NCI_ERR;
+    if (nci_desfire_create_application_iso(p, NDEF_AID, 0x0F,
+            NCI_DESFIRE_KS2_AES | NCI_DESFIRE_KS2_ISO_FIDS | 0x01,
+            0x10E1, NDEF_DF, sizeof NDEF_DF) != NCI_OK) return NCI_ERR;
+
+    /* App: the CC (E103) and NDEF (E104) data files, free read. */
+    if (nci_desfire_select_application(p, NDEF_AID) != NCI_OK) return NCI_ERR;
+    if (nci_desfire_authenticate(p, 0, zero) != NCI_OK) return NCI_ERR;
+    if (nci_desfire_create_std_data_file(p, 0x01, 0xE103, NCI_DESFIRE_PLAIN,
+                                         0xEEE0, 32) != NCI_OK) return NCI_ERR;
+    if (nci_desfire_create_std_data_file(p, 0x02, 0xE104, NCI_DESFIRE_PLAIN,
+                                         0xEEE0, ndef_size) != NCI_OK) return NCI_ERR;
+
+    /* Write the Capability Container (read-only to phones), then the NDEF file
+     * as NLEN || message (a single URI record), or NLEN=0 when no url is given. */
+    uint8_t cc[15];
+    t4t_build_cc(cc, (uint16_t)ndef_size, 1);
+    if (nci_desfire_write_data(p, NCI_DESFIRE_PLAIN, 0x01, 0, cc, sizeof cc) != NCI_OK)
+        return NCI_ERR;
+
+    uint8_t file[2 + 256]; uint32_t flen = 2;
+    file[0] = 0; file[1] = 0;
+    if (url && *url) {
+        int mn = ndef_build_uri(url, file + 2, sizeof file - 2);
+        if (mn <= 0) return NCI_ERR;
+        file[0] = (uint8_t)((mn >> 8) & 0xFF);
+        file[1] = (uint8_t)(mn & 0xFF);
+        flen = 2 + (uint32_t)mn;
+    }
+    return nci_desfire_write_data(p, NCI_DESFIRE_PLAIN, 0x02, 0, file, flen);
 }
 
 int nci_desfire_get_key_version(nci *p, uint8_t key_no, uint8_t *version)

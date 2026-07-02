@@ -13,15 +13,11 @@
  */
 #include "nci/nci.h"
 #include "nci/desfire.h"
-#include "nci/ndef.h"
 
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static const uint8_t NDEF_DF[7] = { 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01 };
-#define NDEF_AID 0x000001
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_sig(int s) { (void)s; g_stop = 1; }
@@ -69,64 +65,14 @@ int main(int argc, char **argv)
     if (nci_desfire_get_version(p, &v) == NCI_OK)
         printf("card: %s\n", nci_desfire_product(&v));
 
-#define STEP(call, what) do { if ((call) != NCI_OK) { \
-        fprintf(stderr, "FAILED: %s (status 0x%02X)\n", what, nci_desfire_last_status(p)); \
-        nci_close(p); return 1; } printf("  %s\n", what); } while (0)
-
-    /* PICC: (re)create the NDEF application. */
-    nci_desfire_select_application(p, 0x000000);
-    STEP(nci_desfire_authenticate(p, 0, key), "AuthEV2First (PICC master)");
-    nci_desfire_delete_application(p, NDEF_AID);          /* clear any old one */
-    if (!nci_desfire_session_active(p))
-        STEP(nci_desfire_authenticate(p, 0, key), "re-auth after cleanup");
-    /* KeySettings2 = AES | ISO-FID | 1 key: the ISO-FID bit lets the files
-     * carry ISO File IDs (E103/E104), which Type 4 ISO SELECT EF needs. */
-    STEP(nci_desfire_create_application_iso(p, NDEF_AID, 0x0F,
-            NCI_DESFIRE_KS2_AES | NCI_DESFIRE_KS2_ISO_FIDS | 0x01,
-            0x10E1, NDEF_DF, sizeof NDEF_DF),
-         "CreateApplication (NDEF, ISO FIDs)");
-
-    /* App: create the CC and NDEF files (free read/write). */
-    STEP(nci_desfire_select_application(p, NDEF_AID), "Select NDEF app");
-    STEP(nci_desfire_authenticate(p, 0, key), "AuthEV2First (app key 0)");
-    STEP(nci_desfire_create_std_data_file(p, 0x01, 0xE103, NCI_DESFIRE_PLAIN, 0xEEE0, 32),
-         "CreateStdDataFile CC (E103)");
-    STEP(nci_desfire_create_std_data_file(p, 0x02, 0xE104, NCI_DESFIRE_PLAIN, 0xEEE0, ndef_size),
-         "CreateStdDataFile NDEF (E104)");
-
-    /* Write the Capability Container. */
-    uint16_t maxsz = (uint16_t)ndef_size;
-    uint8_t cc[15] = {
-        0x00, 0x0F,             /* CCLEN */
-        0x20,                   /* mapping version 2.0 */
-        0x00, 0x3B,             /* MLe (max read per APDU) */
-        0x00, 0x34,             /* MLc (max write per APDU) */
-        0x04, 0x06,             /* NDEF File Control TLV */
-        0xE1, 0x04,             /* NDEF file id */
-        (uint8_t)(maxsz >> 8), (uint8_t)(maxsz & 0xFF),   /* max NDEF size */
-        0x00, 0x00,             /* read free, write free */
-    };
-    STEP(nci_desfire_write_data(p, NCI_DESFIRE_PLAIN, 0x01, 0, cc, sizeof cc),
-         "Write Capability Container");
-    uint8_t nlen0[2] = { 0, 0 };
-    STEP(nci_desfire_write_data(p, NCI_DESFIRE_PLAIN, 0x02, 0, nlen0, 2),
-         "Initialise NDEF (NLEN=0)");
-
-    printf("DESFire is now a Type 4 NDEF tag.\n");
-
-    /* Optional: write an initial NDEF URI via the generic Type 4 path. */
-    if (url) {
-        nci_resume_discovery(p);
-        int rf = 0;
-        for (int i = 0; i < 20 && !rf; i++)
-            if (nci_poll(p, &tag, 500) == NCI_TAG_FOUND) rf = 1;
-        uint8_t msg[512];
-        int mn = ndef_build_uri(url, msg, sizeof msg);
-        if (mn > 0 && rf && nci_ndef_write(p, msg, (size_t)mn) == NCI_OK)
-            printf("wrote initial NDEF URI: %s\n", url);
-        else
-            fprintf(stderr, "warning: initial NDEF write failed\n");
+    /* One call does the whole NFC Forum Type 4 provisioning (create app + CC +
+     * NDEF files, write the CC and the URI record). See nci_desfire_format_ndef. */
+    if (nci_desfire_format_ndef(p, key, url, ndef_size) != NCI_OK) {
+        fprintf(stderr, "FAILED: format-ndef (status 0x%02X)\n", nci_desfire_last_status(p));
+        nci_close(p); return 1;
     }
+    printf("DESFire is now a Type 4 NDEF tag.\n");
+    if (url) printf("wrote NDEF URI: %s\n", url);
 
     nci_close(p);
     return 0;

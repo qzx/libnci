@@ -113,6 +113,7 @@ test('nci', test_nci)
 # card application layers (T4T NDEF / NDEF parse / DESFire) vs a mock apdu_fn
 test_cards = executable('test_cards',
   ['tests/test_cards.c', 'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c',
+   'src/ndef_build.c',
    'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])

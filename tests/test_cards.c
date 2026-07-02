@@ -201,6 +201,38 @@ static void test_desfire_ev3_params(void)
     printf("  desfire_ev3_params: OK\n");
 }
 
+/* ====================================================== T4T format ===== */
+static void test_t4t_build_cc(void)
+{
+    uint8_t cc[15];
+    assert(t4t_build_cc(cc, 256, 1) == 15);
+    /* fixed header: CCLEN, ver 2.0, MLe 003B, MLc 0034, TLV 04 06, file E104 */
+    static const uint8_t head[] = { 0x00,0x0F,0x20,0x00,0x3B,0x00,0x34,0x04,0x06,0xE1,0x04 };
+    assert(memcmp(cc, head, sizeof head) == 0);
+    assert(cc[11] == 0x01 && cc[12] == 0x00);   /* max NDEF file size 256 */
+    assert(cc[13] == 0x00);                      /* read access free       */
+    assert(cc[14] == 0xFF);                      /* read-only              */
+    /* writable variant + a different size */
+    assert(t4t_build_cc(cc, 0x0080, 0) == 15);
+    assert(cc[11] == 0x00 && cc[12] == 0x80 && cc[14] == 0x00);
+    printf("  t4t_build_cc: OK\n");
+}
+
+static void test_ndef_qzx_uri(void)
+{
+    /* the QZX launch record: "https://" abbreviated to prefix 0x04, body verbatim */
+    uint8_t msg[64];
+    int n = ndef_build_uri("https://qzx.cards/2e", msg, sizeof msg);
+    assert(n > 0);
+    ndef_record r;
+    assert(ndef_first_record(msg, (size_t)n, &r) == 0 && ndef_is_uri(&r));
+    assert(r.payload[0] == 0x04 && memcmp(r.payload + 1, "qzx.cards/2e", 12) == 0);
+    char uri[64];
+    assert(ndef_get_uri(&r, uri, sizeof uri) > 0);
+    assert(strcmp(uri, "https://qzx.cards/2e") == 0);
+    printf("  ndef_qzx_uri: OK\n");
+}
+
 /* ========================================================= MIFARE ===== */
 /* Mock raw-exchange: assert the proprietary header bytes, return canned replies
  * by command shape. */
@@ -344,6 +376,8 @@ int main(void)
     test_desfire_apps_and_files();
     test_desfire_error_status();
     test_desfire_ev3_params();
+    test_t4t_build_cc();
+    test_ndef_qzx_uri();
     test_mifare();
     test_mfc_ndef();
     printf("all tests passed\n");

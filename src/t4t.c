@@ -250,3 +250,20 @@ int t4t_read_ndef(apdu_fn fn, void *ctx,
     LOGD("t4t: read %zu byte NDEF message", total);
     return NCI_OK;
 }
+
+size_t t4t_build_cc(uint8_t out[15], uint16_t ndef_file_size, int read_only)
+{
+    /* NFC Forum Type 4 Capability Container (mapping version 2.0): a fixed
+     * header + one NDEF File Control TLV pointing at file E104. */
+    out[0]  = 0x00; out[1] = 0x0F;                 /* CCLEN = 15                       */
+    out[2]  = 0x20;                                 /* mapping version 2.0             */
+    out[3]  = 0x00; out[4] = 0x3B;                  /* MLe: max bytes read per APDU    */
+    out[5]  = 0x00; out[6] = 0x34;                  /* MLc: max bytes written per APDU */
+    out[7]  = 0x04; out[8] = 0x06;                  /* NDEF File Control TLV: T=04 L=06 */
+    out[9]  = 0xE1; out[10] = 0x04;                 /*   NDEF file id E104             */
+    out[11] = (uint8_t)(ndef_file_size >> 8);       /*   max NDEF file size            */
+    out[12] = (uint8_t)(ndef_file_size & 0xFF);
+    out[13] = 0x00;                                 /*   read access: free             */
+    out[14] = read_only ? 0xFF : 0x00;              /*   write access: locked / free   */
+    return 15;
+}

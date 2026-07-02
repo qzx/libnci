@@ -30,4 +30,10 @@ int t4t_format(apdu_fn fn, void *ctx);
 /* Set the CC write-access byte to 0xFF (read-only). (impl.txt #26) */
 int t4t_make_read_only(apdu_fn fn, void *ctx);
 
+/* Build the 15-byte Capability Container for a Type 4 tag whose NDEF file is
+ * E104 and at most ndef_file_size bytes. read_only sets the NDEF write-access
+ * byte to 0xFF (phones treat the tag as read-only) instead of 0x00 (writable).
+ * Pure - no card. Always writes 15 bytes; returns 15. */
+size_t t4t_build_cc(uint8_t out[15], uint16_t ndef_file_size, int read_only);
+
 #endif /* NCI_T4T_H */
