@@ -423,14 +423,21 @@ int desfire_ev2_read_data(apdu_fn fn, void *ctx, desfire_ev2_session *s,
             return read_one(fn, ctx, s, comm, file_no, offset, 0, out, out_cap, out_len);
     }
 
+    /* The whole file must fit: quietly stopping at out_cap used to hand the caller a TRUNCATED
+     * file with NCI_OK — downstream that read as "success" and the client choked on the cut-off
+     * payload ("not a valid QZX interaction") with no clue why. Too small = hard error, loudly. */
+    if (length > out_cap) {
+        LOGE("desfire_ev2: read fid=%u needs %uB but caller buffer is %zuB",
+             file_no, (unsigned)length, out_cap);
+        return NCI_ERR;
+    }
+
     /* Split into frame-sized reads at successive offsets. */
     size_t chunk = frame_data_chunk(s->frame_size, dec);
     size_t total = 0;
     for (uint32_t done = 0; done < length; ) {
         uint32_t n = (length - done) < chunk ? (length - done) : (uint32_t)chunk;
         size_t got = 0;
-        if (total + n > out_cap) n = (uint32_t)(out_cap - total);
-        if (n == 0) break;
         if (read_one(fn, ctx, s, comm, file_no, offset + done, n,
                      out + total, out_cap - total, &got) != NCI_OK)
             return NCI_ERR;

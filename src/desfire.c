@@ -51,7 +51,14 @@ int desfire_apdu_raw(apdu_fn fn, void *ctx, uint8_t ins,
     }
     *status = rx[rn - 1];
     size_t dlen = rn - 2;
-    if (dlen > out_cap) dlen = out_cap;
+    if (dlen > out_cap) {
+        /* NEVER truncate silently. A clamped frame used to propagate as a SUCCESSFUL short read
+         * all the way to the client, which then failed parsing the payload ("not a valid QZX
+         * interaction") with zero hint why. Too-small caller buffer = hard error. */
+        LOGE("desfire: ins 0x%02x response %zuB overflows caller buffer (%zuB)",
+             ins, dlen, out_cap);
+        return NCI_ERR;
+    }
     memcpy(out, rx, dlen);
     *out_len = dlen;
     return NCI_OK;
