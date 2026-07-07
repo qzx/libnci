@@ -138,7 +138,17 @@ const nci_chipset_info *nci_chipset_find(const char *name);
  * Returns NULL on failure. */
 nci *nci_open(const char *chipset, const nci_config *cfg);
 
-/* The chipset driver bound to an open device (never NULL for a live dev). */
+/* A "headless" device with no local NFCC: nci_transceive() is delegated to `fn`, which moves the
+ * ISO-DEP APDU to the card by whatever means (e.g. tunnels it over a socket to a remote reader / BLE
+ * bridge) and returns the raw response. The handle presents a pre-activated ISO-DEP tag, so the
+ * whole nci_desfire_* API works unchanged - the DESFire crypto runs here, the antenna is remote.
+ * The caller owns card discovery/UID. fn returns 0 on success with *rx_len set, <0 on error.
+ * Available in every build (hardware or headless); free with nci_close(). */
+typedef int (*nci_apdu_fn)(void *ctx, const uint8_t *tx, size_t tx_len,
+                           uint8_t *rx, size_t rx_cap, size_t *rx_len);
+nci *nci_open_apdu(nci_apdu_fn fn, void *ctx);
+
+/* The chipset driver bound to an open device (NULL for a headless/nci_open_apdu handle). */
 const nci_chipset_info *nci_dev_chipset(nci *d);
 
 /* Power off and free all resources. Safe with NULL. */
@@ -244,6 +254,22 @@ int nci_rf_interface_of(nci *d);
 /* Abort a blocked poll/transceive from another thread (impl.txt #8). Wakes the
  * waiting call immediately; that call returns NCI_E_ABORTED. */
 int nci_abort(nci *d);
+
+/* ---- card emulation (listen mode) -------------------------------------- *
+ * Present the controller as an NFC Forum Type-4 Tag serving one read-only
+ * NDEF message (e.g. a URI built with ndef_build_uri). Listen mode is
+ * PASSIVE — the phone's field powers the exchange; we emit no field.
+ *
+ * nci_ce_start arms listening (stops any polling first). The caller owns
+ * ndef_msg and must keep it alive until nci_ce_stop. Pump nci_ce_service
+ * from the main loop with a short timeout; it handles reader activation,
+ * serves the T4T APDUs, and re-arms after the reader leaves. Returns 1 when
+ * something happened, 0 on idle, <0 on error. */
+int  nci_ce_start(nci *d, const uint8_t *ndef_msg, size_t ndef_len);
+int  nci_ce_service(nci *d, int timeout_ms);
+int  nci_ce_stop(nci *d);
+/* True while a reader (phone) is actively coupled to the emulated tag. */
+bool nci_ce_reader_present(nci *d);
 
 /* ---- asynchronous (callback) discovery (impl.txt #9) ------------------ *
  * An alternative to the blocking nci_poll loop: a background thread polls and

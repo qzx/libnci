@@ -19,6 +19,7 @@
 #include "crypto.h"
 
 #include <string.h>
+#include "esp_random.h"   /* esp_random() - ESP-IDF hardware RNG (arduino-esp32 >= 3.0) */
 #include "mbedtls/aes.h"
 #if defined(__has_include)
 #  if __has_include("mbedtls/des.h")

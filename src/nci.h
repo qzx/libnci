@@ -117,6 +117,33 @@ int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
  * pkt points at the full packet (header + payload). Returns 0 or <0. */
 int nci_parse_activation(const uint8_t *pkt, size_t len, nci_tag *tag);
 
+/* ---- card emulation (listen mode): a Type-4 Tag serving one NDEF ------- *
+ * ce.c - pure logic over the transport, mirroring the poll-side style. The
+ * caller owns the NDEF bytes (must stay alive while emulation runs). */
+typedef struct {
+    const uint8_t *ndef;      /* caller-owned NDEF message                  */
+    size_t   ndef_len;
+    uint8_t  cc[15];          /* Capability Container, built at begin       */
+    bool     active;          /* a reader currently has us activated        */
+    uint8_t  sel;             /* selected file: 0 none, 1 CC, 2 NDEF        */
+    uint8_t  max_payload;     /* NCI data payload limit from the activation */
+    int      credits;         /* Conn-0 flow-control credits                */
+} nci_ce_state;
+
+/* Configure NFC-A listen + ISO-DEP routing to the host and start listen-mode
+ * discovery. The PN7160 then appears to a phone as a Type-4 NDEF tag (passive:
+ * emits NO RF field of its own). */
+int nci_ce_begin(nci_transport *t, nci_ce_state *ce,
+                 const uint8_t *ndef, size_t ndef_len);
+
+/* Pump listen-mode events for up to timeout_ms: handles activation, serves
+ * T4T APDUs (SELECT AID/CC/NDEF, READ BINARY), re-arms after deactivation.
+ * Returns 1 if anything happened, 0 on idle timeout, <0 on error. */
+int nci_ce_pump(nci_transport *t, nci_ce_state *ce, int timeout_ms);
+
+/* Leave listen mode (deactivate to idle). */
+int nci_ce_end(nci_transport *t, nci_ce_state *ce);
+
 #ifdef __cplusplus
 }
 #endif

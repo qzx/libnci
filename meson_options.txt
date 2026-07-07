@@ -1,0 +1,2 @@
+option('hardware', type: 'boolean', value: true,
+       description: 'Build the libgpiod/I2C hardware transport. false (or any non-Linux host) = headless: host-side DESFire only, cards reached via nci_open_apdu (e.g. the BLE bridge).')

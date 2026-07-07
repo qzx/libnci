@@ -41,12 +41,15 @@
 struct nci {
     const nci_chip     *chip;
     nci_transport   *t;
+    apdu_fn          remote_apdu;  /* headless (nci_open_apdu): transceive is delegated here */
+    void            *remote_ctx;
     nci_dev_info     info;
     nci_rf_conn         conn;     /* RF data connection for transceive        */
     desfire_ev2_session ev2;      /* DESFire/NTAG 424 secure session, if any   */
     desfire_legacy_session legacy;/* DES/3DES legacy/ISO auth session, if any  */
     desfire_lrp_session lrp;      /* LRP-mode session, if any                  */
     uint32_t            tech_mask;
+    nci_ce_state        ce;          /* card-emulation (listen mode) state     */
     nci_disc_target     targets[MAX_TARGETS];
     size_t              n_targets;
     size_t              sel_idx;
@@ -146,6 +149,7 @@ const char *nci_protocol_name(nci_protocol proto)
     }
 }
 
+#ifndef NCI_HEADLESS   /* only the hardware nci_open() builds these device strings */
 static void build_fw_string(nci *d)
 {
     char *o = d->fw_str;
@@ -165,8 +169,19 @@ static void build_info_string(nci *d)
              d->chip->info.name, d->chip->info.description,
              d->info.nci_version, d->info.manuf_id);
 }
+#endif
 
 /* ---- lifecycle -------------------------------------------------------- */
+/* Headless build (NCI_HEADLESS, e.g. macOS): no libgpiod/I2C transport is compiled in, so there is
+ * no local NFCC. nci_open() is a stub that always fails; callers reach a card via nci_open_apdu(). */
+#ifdef NCI_HEADLESS
+nci *nci_open(const char *chipset, const nci_config *cfg)
+{
+    (void)chipset; (void)cfg;
+    LOGE("nci_open: headless build has no local NFCC (use nci_open_apdu / the bridge)");
+    return NULL;
+}
+#else
 nci *nci_open(const char *chipset, const nci_config *cfg)
 {
     const nci_chip *chip = nci_chip_find(chipset);
@@ -201,8 +216,20 @@ nci *nci_open(const char *chipset, const nci_config *cfg)
         local.gpio_chip = cands[ci][0] ? cands[ci] : NULL;
         d->t = chip->transport_open(&local);
         if (!d->t) continue;
-        if (d->t->reset(d->t->ctx, false) == 0 &&
-            nci_core_reset(d->t, &d->info) == NCI_OK) {
+        /* Cold-boot hardening (ref: ELECHOUSE PN7150/PN7160 connectNCI, which retries
+         * wakeupNCI): the controller can miss the very first CORE_RESET on a slow-rising
+         * VBAT rail (common on bus-powered ESP32 boards at power-on), so re-pulse VEN and
+         * retry a few times before abandoning this candidate. The happy path answers on
+         * attempt 0 and is unchanged. */
+        bool answered = false;
+        for (int attempt = 0; attempt < 3 && !answered; attempt++) {
+            /* reset() re-pulses VEN with its own ~40 ms of settle, which doubles as the
+             * inter-attempt delay (and keeps this path free of a sleep helper). */
+            if (d->t->reset(d->t->ctx, false) == 0 &&
+                nci_core_reset(d->t, &d->info) == NCI_OK)
+                answered = true;
+        }
+        if (answered) {
             LOGD("open: controller answered on %s",
                  cands[ci][0] ? cands[ci] : "(auto)");
             break;
@@ -226,20 +253,43 @@ fail:
     nci_close(d);
     return NULL;
 }
+#endif /* NCI_HEADLESS */
+
+/* Headless handle: no local NFCC - transceive is delegated to `fn` (the caller moves the bytes,
+ * e.g. tunnels the APDU over a socket to the BLE bridge). We present a pre-activated ISO-DEP tag so
+ * nci_tag_supports_apdu() passes and every nci_desfire_* facade drives the same crypto over `fn`.
+ * Card acquisition (discovery/UID) is the caller's job; this handle only transceives. */
+nci *nci_open_apdu(nci_apdu_fn fn, void *ctx)
+{
+    if (!fn) return NULL;
+    nci *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
+    d->remote_apdu = (apdu_fn)fn;
+    d->remote_ctx  = ctx;
+    d->tech_mask   = NCI_TECH_ALL;
+    d->conn.activated    = true;
+    d->conn.rf_interface = 0x02;   /* ISO-DEP */
+    d->conn.rf_protocol  = 0x04;
+    d->conn.max_payload  = 255;
+    d->conn.credits      = 1;
+    return d;
+}
 
 const nci_chipset_info *nci_dev_chipset(nci *d)
 {
-    return d ? &d->chip->info : NULL;
+    return (d && d->chip) ? &d->chip->info : NULL;
 }
 
 void nci_close(nci *d)
 {
     if (!d) return;
     if (d->async_running) nci_stop_async(d);
+#ifndef NCI_HEADLESS
     if (d->t) {
         nci_rf_deactivate_idle(d->t);   /* best-effort: idle the RF field */
         nci_transport_close(d->t);
     }
+#endif
     free(d);
 }
 
@@ -261,6 +311,31 @@ int nci_start_discovery(nci *d, uint32_t tech_mask)
     if (!d) return NCI_E_INVAL;
     d->tech_mask = tech_mask ? tech_mask : NCI_TECH_ALL;
     return nci_rf_discover_mask(d->t, d->tech_mask);
+}
+
+/* ---- card emulation (listen mode T4T NDEF) — see src/ce.c -------------- */
+
+int nci_ce_start(nci *d, const uint8_t *ndef_msg, size_t ndef_len)
+{
+    if (!d || !d->t || !ndef_msg || !ndef_len) return NCI_E_INVAL;
+    return nci_ce_begin(d->t, &d->ce, ndef_msg, ndef_len);
+}
+
+int nci_ce_service(nci *d, int timeout_ms)
+{
+    if (!d || !d->t) return NCI_E_INVAL;
+    return nci_ce_pump(d->t, &d->ce, timeout_ms);
+}
+
+int nci_ce_stop(nci *d)
+{
+    if (!d || !d->t) return NCI_E_INVAL;
+    return nci_ce_end(d->t, &d->ce);
+}
+
+bool nci_ce_reader_present(nci *d)
+{
+    return d && d->ce.active;
 }
 
 /* Issue RF_DISCOVER_SELECT for a buffered target and wait for its activation. */
@@ -436,10 +511,20 @@ int nci_get_capabilities(nci *d, nci_capabilities *out)
 }
 
 /* ---- async (callback) discovery (impl.txt #9) ------------------------- */
+#if defined(ESP_PLATFORM) || defined(ARDUINO)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 static void sleep_ms(unsigned ms)
 {
+#if defined(ESP_PLATFORM) || defined(ARDUINO)
+    TickType_t t = pdMS_TO_TICKS(ms);   /* newlib-nano has no nanosleep; yield via FreeRTOS */
+    vTaskDelay(t ? t : 1);
+#else
     struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
+#endif
 }
 
 static void *async_worker(void *arg)
@@ -502,6 +587,11 @@ int nci_transceive(nci *d, const uint8_t *tx, size_t tx_len,
 {
     if (!d || !tx || !rx) return NCI_E_INVAL;
     if (d->abort_flag) { d->abort_flag = 0; return NCI_E_ABORTED; }
+    if (d->remote_apdu) {                 /* headless: the app moves the APDU (e.g. over the bridge) */
+        size_t rrl = 0;
+        int rr = d->remote_apdu(d->remote_ctx, tx, tx_len, rx, rx_cap, &rrl);
+        return rr < 0 ? NCI_E_IO : (int)rrl;
+    }
     size_t rl = 0;
     int r = nci_apdu_xchg(d->t, &d->conn, tx, tx_len, rx, rx_cap, &rl,
                            timeout_ms < 0 ? 1000 : timeout_ms);

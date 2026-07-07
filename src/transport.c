@@ -29,10 +29,23 @@ typedef struct {
     unsigned int     settle_ms;
 } transport_impl;
 
+#if defined(ESP_PLATFORM) || defined(ARDUINO)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 static void msleep(unsigned int ms)
 {
+#if defined(ESP_PLATFORM) || defined(ARDUINO)
+    /* The ESP32 newlib-nano doesn't link nanosleep; FreeRTOS vTaskDelay is the right sleep here
+     * (it yields the scheduler instead of busy-waiting), with a 1-tick floor so a short delay
+     * still yields. */
+    TickType_t t = pdMS_TO_TICKS(ms);
+    vTaskDelay(t ? t : 1);
+#else
     struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
+#endif
 }
 
 /* ---- vtable: reset ------------------------------------------------ */

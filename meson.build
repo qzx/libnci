@@ -9,24 +9,37 @@ project('nci', 'c',
 # version-compatibility check.
 version_numeric = meson.project_version().split('-')[0]
 
-libgpiod  = dependency('libgpiod', version: '>=2.0')
 libcrypto = dependency('libcrypto', version: '>=3.0')   # OpenSSL: AES/CMAC
 libthreads = dependency('threads')                       # async discovery worker
+
+# Headless build (no local NFCC): drop the libgpiod/I2C transport + chipset drivers, keep the whole
+# protocol + DESFire/NDEF card stack, and reach cards via nci_open_apdu() (host-side crypto, remote
+# antenna - the BLE bridge). Forced on any non-Linux host (libgpiod is Linux-only); -Dhardware=false
+# selects it on Linux too.
+hardware = get_option('hardware') and host_machine.system() == 'linux'
 
 inc_all    = include_directories('include', 'src')
 inc_public = include_directories('include')
 
 # --- core library ---------------------------------------------------------
-# Hardware/transport layer + chipset drivers + generic device core + the pure
-# card-application and protocol layers. pn7160 is one chipset under src/chips/.
+# Generic device core + the pure card-application and protocol layers. These have NO hardware
+# dependency: nci.c drives the transport only through a vtable pointer.
 nci_sources = [
-  'src/gpio.c', 'src/i2c.c', 'src/transport.c',
-  'src/nci.c', 'src/chipset.c', 'src/chips/pn7160.c', 'src/device.c',
+  'src/nci.c', 'src/device.c', 'src/ce.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
-  'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
+  'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/desfire_lrp.c', 'src/desfire_dam.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
 ]
+nci_deps  = [libcrypto, libthreads]
+nci_cargs = []
+if hardware
+  # Hardware/transport layer + chipset drivers (pn7160 is one chipset under src/chips/).
+  nci_sources += ['src/gpio.c', 'src/i2c.c', 'src/transport.c', 'src/chipset.c', 'src/chips/pn7160.c']
+  nci_deps    += dependency('libgpiod', version: '>=2.0')
+else
+  nci_cargs += '-DNCI_HEADLESS'
+endif
 
 # A proper versioned library (impl.txt #138). default_library=both builds the
 # shared .so (with an soname) and the static .a; the soname carries soversion 0
@@ -37,7 +50,8 @@ nci_lib = library('nci',
   version: version_numeric,   # full .so.X.Y.Z symlink
   soversion: '0',             # SONAME: libnci.so.0 (unstable ABI during alpha)
   include_directories: inc_all,
-  dependencies: [libgpiod, libcrypto, libthreads],
+  c_args: nci_cargs,
+  dependencies: nci_deps,
   install: true)
 
 nci_dep = declare_dependency(
@@ -49,17 +63,20 @@ hcinfc_dep = nci_dep
 pn7160_dep = nci_dep
 
 # --- demo / CLI apps -------------------------------------------------------
-foreach app : ['nfc-detect', 'nfc-read-ndef', 'nfc-write-ndef',
-               'desfire-info', 'desfire-auth',
-               'desfire-manage', 'desfire-ev3-test', 'desfire-session-test',
-               'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision',
-               'desfire-dam']
-  executable(app, 'apps' / (app + '.c'),
-    include_directories: inc_public,
-    link_with: nci_lib,
-    dependencies: [libgpiod, libcrypto, libthreads],
-    install: true)
-endforeach
+# These open a local NFCC (nci_open), so they only make sense in a hardware build.
+if hardware
+  foreach app : ['nfc-detect', 'nfc-read-ndef', 'nfc-write-ndef',
+                 'desfire-info', 'desfire-auth',
+                 'desfire-manage', 'desfire-ev3-test', 'desfire-session-test',
+                 'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision',
+                 'desfire-dam']
+    executable(app, 'apps' / (app + '.c'),
+      include_directories: inc_public,
+      link_with: nci_lib,
+      dependencies: nci_deps,
+      install: true)
+  endforeach
+endif
 
 # --- installed headers + pkg-config (impl.txt #137, #139) -----------------
 install_subdir('include/nci', install_dir: get_option('includedir'))
@@ -71,7 +88,7 @@ import('pkgconfig').generate(nci_lib,
   name: 'libnci',
   description: 'Modern NFC reader/writer stack (PN7160 and other NCI controllers)',
   subdirs: '.',
-  requires_private: ['libcrypto', 'libgpiod'],
+  requires_private: hardware ? ['libcrypto', 'libgpiod'] : ['libcrypto'],
   libraries_private: ['-pthread'],
   extra_cflags: [])
 
@@ -114,7 +131,7 @@ test('nci', test_nci)
 test_cards = executable('test_cards',
   ['tests/test_cards.c', 'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c',
    'src/ndef_build.c',
-   'src/desfire.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/crypto.c', 'src/log.c'],
+   'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('cards', test_cards)

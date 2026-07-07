@@ -499,6 +499,10 @@ int nci_poll_ex(nci_transport *t, nci_tag *tag, nci_rf_conn *conn,
     if (mt(pkt) == MT_NTF && gid(pkt) == GID_RF && oid(pkt) == OID_RF_DISCOVER_NTF) {
         size_t cnt = 0;
         uint8_t more = 1;
+        /* The NFCC bursts the target list back-to-back, so after the first NTF every
+         * follow-up is imminent: cap the wait so we can't sit here guard*timeout_ms if
+         * `more` never clears (a stall that wedged loop() over the BLE bridge). */
+        int to = timeout_ms > 120 ? 120 : timeout_ms;
         for (int guard = 0; guard < 32; guard++) {
             nci_disc_target tg;
             if (parse_discover_ntf(pkt, (size_t)n, &tg, &more) == NCI_OK) {
@@ -506,7 +510,7 @@ int nci_poll_ex(nci_transport *t, nci_tag *tag, nci_rf_conn *conn,
                 cnt++;
             }
             if (!more) break;
-            n = t->read(t->ctx, pkt, sizeof pkt, timeout_ms);
+            n = t->read(t->ctx, pkt, sizeof pkt, to);
             if (n < HDR_LEN) break;
             if (!(mt(pkt) == MT_NTF && gid(pkt) == GID_RF &&
                   oid(pkt) == OID_RF_DISCOVER_NTF))
@@ -577,8 +581,9 @@ int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
 
     /* Collect the response, reassembling NCI-level chained data packets. */
     size_t total = 0;
+    int to = timeout_ms;
     for (int guard = 0; guard < 64; guard++) {
-        int n = t->read(t->ctx, buf, sizeof buf, timeout_ms);
+        int n = t->read(t->ctx, buf, sizeof buf, to);
         if (n == 0) { LOGE("nci: transceive timeout"); return NCI_TIMEOUT; }
         if (n < HDR_LEN) return NCI_ERR;
 
@@ -609,6 +614,12 @@ int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
             return NCI_ERR;
         }
         LOGD("nci: ignoring %02x%02x during transceive", buf[0], buf[1]);
+        /* A stray notification (e.g. RF discovery still running after a messy
+         * field restart) must NOT let us wait the full timeout again per packet:
+         * that turns a notification storm into a guard*timeout_ms freeze (a
+         * multi-second wedge seen over the BLE bridge). The real DATA response is
+         * imminent, so cap every wait after the first stray. */
+        if (to > 80) to = 80;
     }
     LOGE("nci: too many fragments");
     return NCI_ERR;
