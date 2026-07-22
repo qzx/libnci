@@ -5,3 +5,4 @@
 *.a
 # NTAG 424 DNA provisioning keyfiles - contain AES keys, never commit
 *.keys
+.cache/
