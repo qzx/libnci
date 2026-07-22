@@ -365,7 +365,17 @@ int nci_poll(nci *d, nci_tag *out, int timeout_ms)
     if (r == NCI_POLL_MULTI) {
         /* Several targets: activate the first so a tag is live, and tell the
          * caller more remain (use nci_select_next_tag to cycle). */
-        if (activate_target(d, 0, out) != NCI_OK) return NCI_ERR;
+        if (activate_target(d, 0, out) != NCI_OK) {
+            /* Marginal RF (the two-card sandwich): the select can time out and
+             * strand the NFCC in W4_HOST_SELECT, where only deactivate(IDLE) is
+             * legal — every later poll would sit silent until a power cycle.
+             * Self-heal: idle, re-arm discovery, report "none this poll". The
+             * just-collected census (d->n_targets) is kept so the caller can
+             * still LIST what the field held; a select must run a fresh cycle. */
+            nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
+            if (d->tech_mask) nci_rf_discover_mask(d->t, d->tech_mask);
+            return NCI_POLL_NONE;
+        }
         out->more = (d->n_targets > 1);
         return NCI_POLL_TAG;
     }
@@ -399,6 +409,101 @@ int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol)
         }
     }
     return NCI_E_INVAL;
+}
+
+/* One fresh discovery census from ANY prior RF state. Best-effort idle (some states
+ * reject RF_DEACTIVATE — fine), best-effort re-discover (DISCOVERY_ALREADY_STARTED is
+ * not an error: discovery running is exactly what we want; the poll below is the sole
+ * arbiter of truth), then one poll to collect the field into d->targets. On a lone tag
+ * the NFCC auto-activates and sends no census burst — synthesize its entry. Returns the
+ * poll result; the table is valid either way. State afterward: lone tag = ACTIVE, multi
+ * = W4_HOST_SELECT (callers either activate from there, or re-arm — see below). */
+static int census_run(nci *d, nci_tag *tag, int timeout_ms)
+{
+    /* Force a genuinely FRESH discovery round. Static cards announce exactly once per
+     * round, so reusing a running round reads silence; and the previous round's burst
+     * may still sit unread in the queue, masquerading as this round's census. So:
+     * deactivate (may be rejected from some states - retry), DRAIN the stale packets,
+     * then re-discover. DISCOVERY_ALREADY_STARTED after a successful drain+deactivate
+     * cycle is accepted as "running fresh enough" and the poll below arbitrates. */
+    uint8_t junk[300];
+    bool started = false;
+    for (int k = 0; k < 2 && !started; k++) {
+        nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
+        while (d->t->read(d->t->ctx, junk, sizeof junk, 30) > 0) {}   /* flush stale burst */
+        started = nci_rf_discover_mask(d->t, d->tech_mask ? d->tech_mask : NCI_TECH_A) == NCI_OK;
+    }
+    d->conn.activated = false;                       /* whatever session existed is gone */
+    d->n_targets = 0; d->sel_idx = 0;
+    int r = nci_poll_ex(d->t, tag, &d->conn, d->targets, MAX_TARGETS,
+                        &d->n_targets, timeout_ms);
+    if (r == NCI_TAG_FOUND && d->n_targets == 0) {   /* lone tag: synthesize the entry */
+        nci_disc_target *tg = &d->targets[0];
+        memset(tg, 0, sizeof *tg);
+        tg->rf_disc_id  = d->conn.disc_id;
+        tg->rf_protocol = (uint8_t)tag->protocol;
+        tg->tech_mode   = tag->tech_mode;
+        tg->uid_len     = tag->uid_len;
+        memcpy(tg->uid, tag->uid, tag->uid_len);
+        tg->sak         = tag->sak;
+        d->n_targets    = 1;
+    }
+    return r;
+}
+
+/* Re-arm discovery from whatever census_run left (W4_HOST_SELECT after multi, ACTIVE
+ * after lone-tag) so ordinary polling keeps working afterward. Best-effort. */
+static void census_rearm(nci *d)
+{
+    nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
+    d->conn.activated = false;
+    if (d->tech_mask) nci_rf_discover_mask(d->t, d->tech_mask);
+}
+
+/* Public census: enumerate the field into `out` (like nci_list_targets) but running a
+ * complete fresh cycle internally — callable from ANY prior state, repeatable, and the
+ * RF machine is left re-armed for ordinary polling. (the two-card sandwich) */
+int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms)
+{
+    if (!d) return NCI_E_INVAL;
+    nci_tag tag;
+    census_run(d, &tag, timeout_ms > 0 ? timeout_ms : 500);
+    int n = nci_list_targets(d, out, cap);
+    census_rearm(d);
+    return n;
+}
+
+/* Activate the card with this exact UID, from ANY prior RF state. disc_ids are only
+ * meaningful within one discovery round, so the census and the activation live inside
+ * the same fresh cycle — no stale cross-call state. One retry covers marginal RF (two
+ * cards loading one antenna). Fills *out from the ACTIVATION notification — the wire
+ * truth, which can differ from a census UID mangled by a marginal anticollision. */
+int nci_select_uid(nci *d, const uint8_t *uid, uint8_t uid_len, nci_tag *out)
+{
+    if (!d || !uid || !uid_len || uid_len > NCI_MAX_UID_LEN) return NCI_E_INVAL;
+    nci_tag tag;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int r = census_run(d, &tag, 500);
+        if (r == NCI_TAG_FOUND) {              /* lone tag: auto-activated already */
+            if (tag.uid_len == uid_len && memcmp(tag.uid, uid, uid_len) == 0) {
+                if (out) *out = tag;
+                return NCI_OK;
+            }
+            continue;                          /* the only tag isn't the asked-for one */
+        }
+        if (r != NCI_POLL_MULTI) continue;
+        for (size_t i = 0; i < d->n_targets; i++) {
+            if (d->targets[i].uid_len == uid_len &&
+                memcmp(d->targets[i].uid, uid, uid_len) == 0) {
+                d->sel_idx = i;
+                /* multi leaves W4_HOST_SELECT — precisely where SELECT is legal */
+                if (activate_target(d, i, out ? out : &tag) == NCI_OK) return NCI_OK;
+                break;                         /* activation failed: run a fresh cycle */
+            }
+        }
+    }
+    census_rearm(d);                           /* leave the machine sane for the next poll */
+    return NCI_E_TAG_GONE;
 }
 
 int nci_list_targets(nci *d, nci_tag *out, size_t cap)

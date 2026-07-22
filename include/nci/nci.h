@@ -209,6 +209,17 @@ int nci_poll(nci *d, nci_tag *out, int timeout_ms);
 int nci_select_next_tag(nci *d, nci_tag *out);
 int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol);
 
+/* Activate the card with this exact UID, from ANY prior RF state: runs its own
+ * fresh discover/census/select cycle (disc_ids only live within one round) with
+ * one retry for marginal RF. *out is filled from the activation NTF — the wire
+ * truth. NCI_E_TAG_GONE = no card with that UID answered. (two-card sandwich) */
+int nci_select_uid(nci *d, const uint8_t *uid, uint8_t uid_len, nci_tag *out);
+
+/* Enumerate the field like nci_list_targets, but as a COMPLETE fresh cycle:
+ * callable from any prior RF state, repeatable, and discovery is re-armed on
+ * return so ordinary polling keeps working. (two-card sandwich) */
+int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms);
+
 /* Enumerate every tag the last multi-target poll detected, without activating
  * any. Fills up to `cap` descriptors (disc_id, protocol, tech_mode, uid, sak)
  * and returns the total number in the field (which may exceed `cap`). Use the
