@@ -9,9 +9,9 @@
 #include <string.h>
 
 static const nci_chip *const registry[] = {
-    &nci_chip_pn7160,
+    &nci_chip_pn7160,   /* default (NCI 2.0) */
+    &nci_chip_pn7150,   /* NCI 1.0 */
     /* Future controllers slot in here, e.g.:
-     *   &nci_chip_pn7150,
      *   &nci_chip_pn5180,
      */
 };

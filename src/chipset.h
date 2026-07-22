@@ -42,7 +42,8 @@ const nci_chip *nci_chip_at(size_t index);
 size_t          nci_chip_count(void);
 
 /* Compiled-in chipset drivers. */
-extern const nci_chip nci_chip_pn7160;
+extern const nci_chip nci_chip_pn7160;   /* NCI 2.0 */
+extern const nci_chip nci_chip_pn7150;   /* NCI 1.0 */
 
 #ifdef __cplusplus
 }

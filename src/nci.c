@@ -146,19 +146,55 @@ int nci_core_reset(nci_transport *t, nci_dev_info *info)
 /* ---- CORE_INIT --------------------------------------------------- */
 int nci_core_init(nci_transport *t, nci_dev_info *info)
 {
-    /* NCI 2.0 CORE_INIT carries two feature bytes; harmless on 2.0 chips. */
-    static const uint8_t cmd[] = { 0x20, 0x01, 0x02, 0x00, 0x00 };
+    /* CORE_INIT_CMD differs by NCI version, and the version is already known
+     * from the preceding CORE_RESET:
+     *   NCI 2.0: 5-byte form with two feature bytes  (20 01 02 00 00)
+     *   NCI 1.0: 3-byte form, empty payload          (20 01 00)
+     * A strict NCI 1.0 controller (e.g. PN7150) can reject the over-long 2.0
+     * command, so pick the right form per version. Unknown version (info NULL
+     * or 0) falls back to the 2.0 form, preserving prior behaviour. */
+    static const uint8_t cmd_v2[] = { 0x20, 0x01, 0x02, 0x00, 0x00 };
+    static const uint8_t cmd_v1[] = { 0x20, 0x01, 0x00 };
+    const int is_v1 = info && info->nci_version && info->nci_version < 0x20;
+    const uint8_t *cmd = is_v1 ? cmd_v1 : cmd_v2;
+    size_t         cmdlen = is_v1 ? sizeof cmd_v1 : sizeof cmd_v2;
+
     uint8_t rsp[MAX_PKT];
     size_t  rlen = 0;
 
-    if (command(t, cmd, sizeof cmd, rsp, sizeof rsp, &rlen) != NCI_OK)
+    if (command(t, cmd, cmdlen, rsp, sizeof rsp, &rlen) != NCI_OK)
         return NCI_ERR;
     if (rsp[3] != NCI_STATUS_OK) {
         LOGE("nci: CORE_INIT status 0x%02x", rsp[3]);
         return NCI_ERR;
     }
-    /* If CORE_RESET_NTF gave us nothing (NCI 1.0), keep the tail of the
-     * INIT_RSP as a coarse firmware fingerprint. */
+
+    /* NCI 1.0 has no CORE_RESET_NTF, so the Manufacturer ID + Manufacturer-
+     * Specific Info live at the END of CORE_INIT_RSP. Parse them here so
+     * identification / fw strings work on a 1.0 part (PN7150). Layout:
+     *   status(1) features(4) num_rf(1) rf[num_rf] max_conn(1) route_tbl(2)
+     *   max_ctrl_pkt(1) max_large(2) manuf_id(1) manuf_info(...)
+     * RF-interface entries are 1 byte each on NCI 1.0 (2.0 adds extensions -
+     * which is why this parse is gated on is_v1). */
+    if (is_v1 && info) {
+        const uint8_t *p = rsp + HDR_LEN;
+        size_t plen = rsp[2];
+        size_t off  = 1 + 4;                        /* skip status + features   */
+        if (off < plen) {
+            uint8_t num_rf = p[off];
+            off += 1u + num_rf;                     /* count + 1-byte entries   */
+            off += 1u + 2u + 1u + 2u;               /* conn, route, ctrl, large */
+            if (off < plen) {
+                info->manuf_id = p[off++];
+                size_t mlen = plen - off;
+                if (mlen > sizeof info->fw_info) mlen = sizeof info->fw_info;
+                if (mlen) { memcpy(info->fw_info, &p[off], mlen); info->fw_info_len = mlen; }
+            }
+        }
+    }
+
+    /* Fallback: if neither CORE_RESET_NTF (2.0) nor the 1.0 parse yielded any
+     * manufacturer info, keep the RSP tail as a coarse firmware fingerprint. */
     if (info && info->fw_info_len == 0 && rlen > HDR_LEN) {
         size_t take = rlen - HDR_LEN;
         if (take > sizeof info->fw_info) {
@@ -171,7 +207,7 @@ int nci_core_init(nci_transport *t, nci_dev_info *info)
             info->fw_info_len = take;
         }
     }
-    LOGD("nci: CORE_INIT ok (rsp len %zu)", rlen);
+    LOGD("nci: CORE_INIT ok (%s, rsp len %zu)", is_v1 ? "NCI 1.0" : "NCI 2.0", rlen);
     return NCI_OK;
 }
 

@@ -34,8 +34,9 @@ nci_sources = [
 nci_deps  = [libcrypto, libthreads]
 nci_cargs = []
 if hardware
-  # Hardware/transport layer + chipset drivers (pn7160 is one chipset under src/chips/).
-  nci_sources += ['src/gpio.c', 'src/i2c.c', 'src/transport.c', 'src/chipset.c', 'src/chips/pn7160.c']
+  # Hardware/transport layer + chipset drivers (pn7160/pn7150 under src/chips/).
+  nci_sources += ['src/gpio.c', 'src/i2c.c', 'src/transport.c', 'src/chipset.c',
+                  'src/chips/pn7160.c', 'src/chips/pn7150.c']
   nci_deps    += dependency('libgpiod', version: '>=2.0')
 else
   nci_cargs += '-DNCI_HEADLESS'
