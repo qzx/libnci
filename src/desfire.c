@@ -204,3 +204,35 @@ uint32_t nci_desfire_storage_bytes(uint8_t storage_code)
     if (exp == 0 || exp > 31) return 0;
     return 1u << exp;
 }
+
+/* Human name for a DESFire status byte - the value nci_desfire_last_status
+ * returns after a secure-messaging command. Pure function; never returns NULL
+ * (unknown codes map to "unknown DESFire status"). Mirrors nci_status_str. */
+const char *nci_desfire_status_str(uint8_t status)
+{
+    switch (status) {
+    case 0x00: return "OPERATION_OK";
+    case 0x0C: return "NO_CHANGES";
+    case 0x0E: return "OUT_OF_EEPROM_ERROR";
+    case 0x1C: return "ILLEGAL_COMMAND_CODE";
+    case 0x1E: return "INTEGRITY_ERROR";
+    case 0x40: return "NO_SUCH_KEY";
+    case 0x7E: return "LENGTH_ERROR";
+    case 0x9D: return "PERMISSION_DENIED";
+    case 0x9E: return "PARAMETER_ERROR";
+    case 0xA0: return "APPLICATION_NOT_FOUND";
+    case 0xA1: return "APPL_INTEGRITY_ERROR";
+    case 0xAE: return "AUTHENTICATION_ERROR";
+    case 0xAF: return "ADDITIONAL_FRAME";
+    case 0xBE: return "BOUNDARY_ERROR";
+    case 0xC1: return "PICC_INTEGRITY_ERROR";
+    case 0xCA: return "COMMAND_ABORTED";
+    case 0xCD: return "PICC_DISABLED_ERROR";
+    case 0xCE: return "COUNT_ERROR";
+    case 0xDE: return "DUPLICATE_ERROR";
+    case 0xEE: return "EEPROM_ERROR";
+    case 0xF0: return "FILE_NOT_FOUND";
+    case 0xF1: return "FILE_INTEGRITY_ERROR";
+    default:   return "unknown DESFire status";
+    }
+}

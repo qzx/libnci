@@ -162,6 +162,11 @@ bool nci_desfire_session_active(nci *p);
  * any command error ends the secure session - re-authenticate before retrying.*/
 uint8_t nci_desfire_last_status(nci *p);
 
+/* Human-readable name for a DESFire status byte (the value nci_desfire_last_status
+ * returns), e.g. "PERMISSION_DENIED", "FILE_NOT_FOUND", "AUTHENTICATION_ERROR".
+ * Pure function; never returns NULL (unknown codes -> "unknown DESFire status"). */
+const char *nci_desfire_status_str(uint8_t status);
+
 /* ReadData of a file whose read access is in full (enciphered) comm mode.
  * Requires a prior successful authenticate. length 0 = whole file. */
 int nci_desfire_read_data_full(nci *p, uint8_t file_no, uint32_t offset,

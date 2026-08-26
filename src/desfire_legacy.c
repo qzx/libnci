@@ -236,3 +236,355 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
     LOGD("desfire: legacy-authenticated key %u", key_no);
     return NCI_OK;
 }
+
+/* ===================================================================== *
+ * Legacy CommMode secure messaging: enciphered (Full) / MACed / Plain
+ * ReadData & WriteData under a D40 (0x0A) or ISO/AS_NEW (0x1A) 3DES session.
+ *
+ * Two wire schemes, selected by s->as_new (set at authentication):
+ *
+ *   D40 / AS_LEGACY (as_new==0): the IV is RESET to zero for every cipher op
+ *   (no cross-command chaining); Full uses CRC-16 over the payload only,
+ *   encipher-to-send is the D40 quirk (DES-decrypt, d40_send) while
+ *   decipher-on-receive is a plain CBC decrypt; the optional MAC is a 4-byte
+ *   CBC-MAC (3DES-CBC encrypt, first 4 bytes of the last block).
+ *
+ *   ISO / AS_NEW (as_new==1): the running IV s->iv CHAINS across the whole
+ *   session; Full uses CRC-32 over cmd||data with CBC-encrypt-to-send; the MAC
+ *   is an 8-byte DES/3DES-CMAC seeded with the running IV (Rb=0x1B), whose tag
+ *   becomes the next IV - structurally identical to the AES AS_NEW path in
+ *   desfire_aes.c, cipher swapped to 3DES.
+ *
+ * Header (fileNo || offset[3] || length[3]) is always sent PLAIN; only the
+ * payload / response is protected. Modelled on libfreefare
+ * mifare_cryto_pre/postprocess_data - self-consistent KATs only, NOT yet
+ * reproduced on hardware (bench-confirm against a legacy/ISO card).
+ * ===================================================================== */
+
+#define INS_READ_DATA  0xBD
+#define INS_WRITE_DATA 0x3D
+#define INS_GET_VALUE  0x6C
+
+static void le24(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+}
+
+/* 8-byte-block subkey shift for DES/3DES-CMAC (Rb = 0x1B). */
+static void lshift_xor1b(const uint8_t in[BL], uint8_t out[BL])
+{
+    uint8_t carry = (uint8_t)(in[0] & 0x80);
+    for (int i = 0; i < BL - 1; i++)
+        out[i] = (uint8_t)((in[i] << 1) | (in[i + 1] >> 7));
+    out[BL - 1] = (uint8_t)(in[BL - 1] << 1);
+    if (carry) out[BL - 1] ^= 0x1B;
+}
+
+/* AS_NEW running-IV DES/3DES-CMAC: RFC 4493 construction over an 8-byte block,
+ * seeded with s->iv instead of zero; the 8-byte tag advances s->iv. Mirrors
+ * aes_cmac_iv (desfire_aes.c) with the cipher and Rb constant swapped. */
+static int legacy_cmac_iv(desfire_legacy_session *s, const uint8_t *data,
+                          size_t len, uint8_t mac[BL])
+{
+    uint8_t z[BL] = {0}, L[BL], K1[BL], K2[BL];
+    if (crypto_3des_cbc(s->session_key, s->session_len, z, z, BL, L, 1) != 0) return -1;
+    lshift_xor1b(L, K1);
+    lshift_xor1b(K1, K2);
+
+    size_t nblocks = (len + BL - 1) / BL;
+    int complete = (len != 0 && len % BL == 0);
+    if (nblocks == 0) nblocks = 1;
+    size_t total = nblocks * BL;
+
+    uint8_t buf[520];
+    if (total > sizeof buf) return -1;
+    memset(buf, 0, total);
+    if (len) memcpy(buf, data, len);
+    uint8_t *last = buf + (nblocks - 1) * BL;
+    if (complete) {
+        for (int i = 0; i < BL; i++) last[i] ^= K1[i];
+    } else {
+        buf[len] = 0x80;                              /* len < total, safe */
+        for (int i = 0; i < BL; i++) last[i] ^= K2[i];
+    }
+
+    uint8_t out[520];
+    if (crypto_3des_cbc(s->session_key, s->session_len, s->iv, buf, total, out, 1) != 0) return -1;
+    memcpy(mac, out + total - BL, BL);
+    memcpy(s->iv, mac, BL);                            /* MAC chain advances */
+    return 0;
+}
+
+/* D40 4-byte CBC-MAC: 3DES-CBC encrypt over the zero-padded message with IV=0,
+ * first 4 bytes of the last cipher block (no session IV chaining under D40). */
+static int d40_mac4(const uint8_t *key, size_t kl, const uint8_t *msg,
+                    size_t len, uint8_t mac4[4])
+{
+    uint8_t z[BL] = {0};
+    size_t total = ((len + BL - 1) / BL) * BL;
+    if (total == 0) total = BL;
+    uint8_t buf[300], out[300];
+    if (total > sizeof buf) return -1;
+    memset(buf, 0, total);
+    if (len) memcpy(buf, msg, len);
+    if (crypto_3des_cbc(key, kl, z, buf, total, out, 1) != 0) return -1;
+    memcpy(mac4, out + total - BL, 4);
+    return 0;
+}
+
+/* Send a plain header, gather the (possibly 0xAF-chained) response, and return
+ * the decrypted/verified payload per comm mode. Shared by ReadData / GetValue.
+ * `length` is the caller-known payload size used as the Full-mode CRC boundary;
+ * 0 = unknown (strip trailing zero pad, then the CRC). */
+static int legacy_recv_protected(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                                 uint8_t ins, const uint8_t *hdr, size_t hdr_len,
+                                 uint8_t comm, uint32_t length,
+                                 uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    if (!s || !s->session_len) { LOGE("desfire: no legacy session"); return NCI_ERR; }
+
+    /* AS_NEW: the command MAC over INS||hdr advances the running IV even though
+     * the header is transmitted in the clear (TX_PLAIN semantics). D40 keeps
+     * IV=0 and does not chain. */
+    if (s->as_new) {
+        uint8_t macin[40]; size_t mi = 0;
+        macin[mi++] = ins;
+        if (hdr_len) { memcpy(macin + mi, hdr, hdr_len); mi += hdr_len; }
+        uint8_t mac[BL];
+        if (legacy_cmac_iv(s, macin, mi, mac) != 0) return NCI_ERR;
+    }
+
+    uint8_t resp[1024]; size_t rn = 0; uint8_t status = 0;
+    if (desfire_apdu_raw(fn, ctx, ins, hdr, (uint8_t)hdr_len, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    while (status == ST_AF) {
+        if (rn >= sizeof resp) { LOGE("desfire: legacy chained resp overflow"); return NCI_ERR; }
+        size_t more = 0; uint8_t st2 = 0;
+        if (desfire_apdu_raw(fn, ctx, ST_AF, NULL, 0, resp + rn, sizeof resp - rn, &more, &st2) != NCI_OK)
+            return NCI_ERR;
+        rn += more; status = st2;
+    }
+    s->last_status = status;
+    if (status != ST_OK) {
+        LOGE("desfire: legacy ins 0x%02x status 0x91%02x - session ended (re-auth needed)", ins, status);
+        s->session_len = 0;
+        return NCI_ERR;
+    }
+
+    if (comm == NCI_DESFIRE_FULL) {
+        if (rn == 0 || rn % BL != 0) {
+            LOGE("desfire: legacy enc resp not block-aligned (%zu)", rn); return NCI_ERR;
+        }
+        uint8_t dec[1024];
+        if (s->as_new) {
+            uint8_t next_iv[BL]; memcpy(next_iv, resp + rn - BL, BL);
+            if (crypto_3des_cbc(s->session_key, s->session_len, s->iv, resp, rn, dec, 0) != 0) return NCI_ERR;
+            memcpy(s->iv, next_iv, BL);                /* IV advances to last recv block */
+        } else {
+            uint8_t iv0[BL] = {0};
+            if (crypto_3des_cbc(s->session_key, s->session_len, iv0, resp, rn, dec, 0) != 0) return NCI_ERR;
+        }
+
+        size_t crc_len = s->as_new ? 4 : 2;
+        size_t payload;
+        if (length) {
+            payload = length;
+            if (payload + crc_len > rn) {
+                LOGE("desfire: legacy enc resp short for length %u", (unsigned)length); return NCI_ERR;
+            }
+        } else {
+            size_t dl = rn;
+            while (dl > 0 && dec[dl - 1] == 0x00) dl--;   /* strip zero pad */
+            if (dl < crc_len) { LOGE("desfire: legacy enc resp too short for CRC"); return NCI_ERR; }
+            payload = dl - crc_len;
+        }
+
+        /* CRC coverage differs by scheme: D40 CRC-16 over data ONLY; AS_NEW
+         * CRC-32 over data||status (status appended, like desfire_aes.c). */
+        if (s->as_new) {
+            uint8_t crcin[1024];
+            memcpy(crcin, dec, payload);
+            crcin[payload] = status;
+            uint32_t want = crypto_crc32_desfire(crcin, payload + 1);
+            uint32_t got = (uint32_t)dec[payload] | ((uint32_t)dec[payload + 1] << 8) |
+                           ((uint32_t)dec[payload + 2] << 16) | ((uint32_t)dec[payload + 3] << 24);
+            if (want != got) { LOGE("desfire: legacy enc resp CRC32 mismatch"); return NCI_ERR; }
+        } else {
+            uint16_t want = crypto_crc16_desfire(dec, payload);
+            uint16_t got = (uint16_t)dec[payload] | ((uint16_t)dec[payload + 1] << 8);
+            if (want != got) { LOGE("desfire: legacy enc resp CRC16 mismatch"); return NCI_ERR; }
+        }
+
+        if (payload > out_cap) {
+            LOGE("desfire: legacy read %zuB overflows caller buffer (%zuB)", payload, out_cap);
+            return NCI_ERR;
+        }
+        if (payload) memcpy(out, dec, payload);
+        if (out_len) *out_len = payload;
+        return NCI_OK;
+    }
+
+    /* MAC / PLAIN response. An authenticated AS_NEW (0x1A/ISO) session MACs EVERY
+     * response - even a PLAIN-comm file read - with an 8-byte CMAC that advances the
+     * running IV (libfreefare: MDCM_PLAIN falls through to MDCM_MACED for AS_NEW).
+     * D40 (as_new==0) only carries a 4-byte MAC in explicit MAC mode. */
+    size_t maclen = s->as_new ? 8u : ((comm == NCI_DESFIRE_MAC) ? 4u : 0u);
+    if (rn < maclen) { LOGE("desfire: legacy resp missing MAC (%zu)", rn); return NCI_ERR; }
+    size_t payload = rn - maclen;
+    if (maclen) {
+        uint8_t macin[1024]; size_t mi = 0;
+        if (payload) { memcpy(macin, resp, payload); mi = payload; }
+        macin[mi++] = status;                          /* MAC covers data||status */
+        if (s->as_new) {
+            uint8_t mac[BL];
+            if (legacy_cmac_iv(s, macin, mi, mac) != 0) return NCI_ERR;
+            if (memcmp(mac, resp + payload, 8) != 0) { LOGE("desfire: legacy resp CMAC mismatch"); return NCI_ERR; }
+        } else {
+            uint8_t mac4[4];
+            if (d40_mac4(s->session_key, s->session_len, macin, mi, mac4) != 0) return NCI_ERR;
+            if (memcmp(mac4, resp + payload, 4) != 0) { LOGE("desfire: legacy resp MAC mismatch"); return NCI_ERR; }
+        }
+    }
+    if (payload > out_cap) {
+        LOGE("desfire: legacy read %zuB overflows caller buffer (%zuB)", payload, out_cap);
+        return NCI_ERR;
+    }
+    if (payload) memcpy(out, resp, payload);
+    if (out_len) *out_len = payload;
+    return NCI_OK;
+}
+
+int desfire_legacy_read_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                             uint8_t comm, uint8_t file_no, uint32_t offset,
+                             uint32_t length, uint8_t *out, size_t out_cap,
+                             size_t *out_len)
+{
+    uint8_t hdr[7];
+    hdr[0] = file_no;
+    le24(hdr + 1, offset);
+    le24(hdr + 4, length);
+    return legacy_recv_protected(fn, ctx, s, INS_READ_DATA, hdr, 7, comm, length,
+                                 out, out_cap, out_len);
+}
+
+int desfire_legacy_get_value(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                             uint8_t comm, uint8_t file_no, int32_t *value)
+{
+    uint8_t out[16]; size_t n = 0;
+    if (legacy_recv_protected(fn, ctx, s, INS_GET_VALUE, &file_no, 1, comm, 4,
+                              out, sizeof out, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n < 4) return NCI_ERR;
+    if (value)
+        *value = (int32_t)((uint32_t)out[0] | ((uint32_t)out[1] << 8) |
+                           ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24));
+    return NCI_OK;
+}
+
+int desfire_legacy_write_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                              uint8_t comm, uint8_t file_no, uint32_t offset,
+                              const uint8_t *data, uint32_t len)
+{
+    if (!s || !s->session_len) { LOGE("desfire: no legacy session"); return NCI_ERR; }
+    if (!data && len) return NCI_ERR;
+    if (len > 200) { LOGE("desfire: legacy write %u B exceeds single-frame budget", (unsigned)len); return NCI_ERR; }
+
+    uint8_t hdr[7];
+    hdr[0] = file_no;
+    le24(hdr + 1, offset);
+    le24(hdr + 4, len);
+
+    const uint8_t ins = INS_WRITE_DATA;
+    uint8_t apdu[300]; size_t ad = 0;
+    memcpy(apdu, hdr, 7); ad = 7;
+
+    if (comm == NCI_DESFIRE_FULL) {
+        if (s->as_new) {
+            /* CRC-32 over INS||hdr||data; encipher data||CRC(LE)||zero-pad with
+             * the running IV, which advances to the last cipher block. */
+            uint8_t crcin[300]; size_t ci = 0;
+            crcin[ci++] = ins;
+            memcpy(crcin + ci, hdr, 7); ci += 7;
+            if (len) { memcpy(crcin + ci, data, len); ci += len; }
+            uint32_t crc = crypto_crc32_desfire(crcin, ci);
+
+            uint8_t pt[256]; size_t pl = 0;
+            if (len) { memcpy(pt, data, len); pl = len; }
+            pt[pl++] = (uint8_t)(crc & 0xFF);
+            pt[pl++] = (uint8_t)((crc >> 8) & 0xFF);
+            pt[pl++] = (uint8_t)((crc >> 16) & 0xFF);
+            pt[pl++] = (uint8_t)((crc >> 24) & 0xFF);
+            while (pl % BL) pt[pl++] = 0x00;
+
+            uint8_t ct[256];
+            if (crypto_3des_cbc(s->session_key, s->session_len, s->iv, pt, pl, ct, 1) != 0) return NCI_ERR;
+            memcpy(s->iv, ct + pl - BL, BL);
+            memcpy(apdu + ad, ct, pl); ad += pl;
+        } else {
+            /* CRC-16 over the payload only; encipher-to-send is the D40 quirk
+             * (d40_send, DES-decrypt), IV=0 for every op. */
+            uint16_t crc = crypto_crc16_desfire(data, len);
+            uint8_t buf[256]; size_t pl = 0;
+            if (len) { memcpy(buf, data, len); pl = len; }
+            buf[pl++] = (uint8_t)(crc & 0xFF);
+            buf[pl++] = (uint8_t)((crc >> 8) & 0xFF);
+            while (pl % BL) buf[pl++] = 0x00;
+            uint8_t iv0[BL] = {0}, ct[256];
+            if (d40_send(s->session_key, s->session_len, iv0, buf, pl, ct) != 0) return NCI_ERR;
+            memcpy(apdu + ad, ct, pl); ad += pl;
+        }
+    } else if (comm == NCI_DESFIRE_MAC) {
+        if (len) { memcpy(apdu + ad, data, len); ad += len; }
+        uint8_t macin[300]; size_t mi = 0;
+        macin[mi++] = ins;
+        memcpy(macin + mi, hdr, 7); mi += 7;
+        if (len) { memcpy(macin + mi, data, len); mi += len; }
+        if (s->as_new) {
+            uint8_t mac[BL];
+            if (legacy_cmac_iv(s, macin, mi, mac) != 0) return NCI_ERR;
+            memcpy(apdu + ad, mac, 8); ad += 8;
+        } else {
+            uint8_t mac4[4];
+            if (d40_mac4(s->session_key, s->session_len, macin, mi, mac4) != 0) return NCI_ERR;
+            memcpy(apdu + ad, mac4, 4); ad += 4;
+        }
+    } else {   /* NCI_DESFIRE_PLAIN */
+        if (len) { memcpy(apdu + ad, data, len); ad += len; }
+        if (s->as_new) {
+            /* Keep the running IV in step even though nothing is appended. */
+            uint8_t macin[300]; size_t mi = 0;
+            macin[mi++] = ins;
+            memcpy(macin + mi, hdr, 7); mi += 7;
+            if (len) { memcpy(macin + mi, data, len); mi += len; }
+            uint8_t mac[BL];
+            if (legacy_cmac_iv(s, macin, mi, mac) != 0) return NCI_ERR;
+        }
+    }
+
+    uint8_t resp[64]; size_t rn = 0; uint8_t status = 0;
+    if (desfire_apdu_raw(fn, ctx, ins, apdu, (uint8_t)ad, resp, sizeof resp, &rn, &status) != NCI_OK)
+        return NCI_ERR;
+    s->last_status = status;
+    if (status != ST_OK) {
+        LOGE("desfire: legacy WriteData status 0x91%02x - session ended (re-auth needed)", status);
+        s->session_len = 0;
+        return NCI_ERR;
+    }
+
+    /* AS_NEW: the response carries an 8-byte CMAC over the status that advances
+     * the running IV; verify it so the next command stays in sync. D40 responses
+     * are a status-only ACK (IV stays 0, nothing to chain). */
+    if (s->as_new) {
+        if (rn < 8) { LOGE("desfire: legacy WriteData resp missing CMAC (%zu)", rn); s->session_len = 0; return NCI_ERR; }
+        size_t payload = rn - 8;
+        uint8_t macin[64]; size_t mi = 0;
+        if (payload) { memcpy(macin, resp, payload); mi = payload; }
+        macin[mi++] = status;
+        uint8_t mac[BL];
+        if (legacy_cmac_iv(s, macin, mi, mac) != 0) return NCI_ERR;
+        if (memcmp(mac, resp + payload, 8) != 0) { LOGE("desfire: legacy WriteData resp CMAC mismatch"); return NCI_ERR; }
+    }
+    return NCI_OK;
+}

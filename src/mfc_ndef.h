@@ -38,6 +38,14 @@ int mfc_ndef_read(mfc_block_io io, void *ctx,
  * Returns 0 or <0 (e.g. message too large for the card). */
 int mfc_ndef_write(mfc_block_io io, void *ctx, const uint8_t *msg, size_t len);
 
+/* Size-aware cores: is_4k=0 is the MAD1/1K geometry (the wrappers above delegate
+ * here with is_4k=0); is_4k=1 adds the MAD2 area (sectors 17..39) for a 4K card.
+ * device.c derives is_4k from the tag SAK (0x18 = MIFARE Classic 4K). */
+int mfc_ndef_read_sz(mfc_block_io io, void *ctx, int is_4k,
+                     uint8_t *out, size_t cap, size_t *out_len);
+int mfc_ndef_write_sz(mfc_block_io io, void *ctx, int is_4k,
+                      const uint8_t *msg, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

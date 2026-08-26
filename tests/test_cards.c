@@ -292,15 +292,32 @@ static void test_mifare(void)
     printf("  mifare: OK (auth/read/write framing, value block)\n");
 }
 
-/* RAM-backed MIFARE 1K for the NDEF-over-MAD round trip (64 blocks). */
-static uint8_t mfc_ram[64][16];
+/* RAM-backed MIFARE 4K for the NDEF-over-MAD round trips (256 blocks). The 1K
+ * test uses only the first 64; the 4K test spans past the MAD2 sector. */
+static uint8_t mfc_ram[256][16];
 static int ram_io(void *ctx, uint8_t block, uint8_t *data, int is_write)
 {
-    (void)ctx;
-    if (block >= 64) return -1;
+    (void)ctx;                 /* a uint8_t block (0..255) always indexes the 4K card */
     if (is_write) memcpy(mfc_ram[block], data, 16);
     else          memcpy(data, mfc_ram[block], 16);
     return 0;
+}
+
+/* Size-aware NDEF core (4K/MAD2), declared in src/mfc_ndef.h and driven by
+ * device.c's facade with a SAK-derived is_4k (0x18 = 4K). Re-declared here so
+ * the test can exercise the MAD2 path directly against a RAM 4K card. */
+int mfc_ndef_read_sz(mfc_block_io io, void *ctx, int is_4k,
+                     uint8_t *out, size_t cap, size_t *out_len);
+int mfc_ndef_write_sz(mfc_block_io io, void *ctx, int is_4k,
+                      const uint8_t *msg, size_t len);
+
+/* Independent MAD entry locator (mirrors the core; a reference for the test).
+ * sectors 1..15 -> MAD1 block 1/2; sectors 17..39 -> MAD2 block 64/65/66. */
+static void t_mad_loc(uint8_t s, int *blk, int *off)
+{
+    if (s >= 1 && s <= 7)   { *blk = 1;  *off = 2 + (s - 1) * 2; }
+    else if (s <= 15)       { *blk = 2;  *off = (s - 8) * 2; }
+    else { int L = 2 + (s - 17) * 2; *blk = 64 + L / 16; *off = L % 16; }
 }
 
 static void test_mfc_ndef(void)
@@ -338,6 +355,84 @@ static void test_mfc_ndef(void)
     assert(mfc_ndef_write(ram_io, NULL, NULL, 0) == NCI_OK);
     assert(mfc_ndef_read(ram_io, NULL, out, sizeof out, &olen) == NCI_OK && olen == 0);
     printf("  mfc_ndef: OK (MAD CRC, write/read round trip, format)\n");
+}
+
+/* 4K / MAD2: NDEF that spans past the MAD2 sector (16) and reaches the 16-block
+ * upper sectors. Exercises the size-aware core directly through the RAM seam. */
+static void test_mfc_ndef_4k(void)
+{
+    /* MAD2 CRC-8 KAT: all 23 sectors NDEF, Info=0x00 -> 0x9E (Info=0x01 -> 0xE8);
+     * same routine that yields the MAD1 all-NDEF Info=0x01 KAT 0x14 above. */
+    uint8_t mad2[47];
+    mad2[0] = 0x00;
+    for (int i = 1; i < 47; i += 2) { mad2[i] = 0x03; mad2[i + 1] = 0xE1; }
+    assert(mfc_mad_crc8(mad2, sizeof mad2) == 0x9E);
+    mad2[0] = 0x01;
+    assert(mfc_mad_crc8(mad2, sizeof mad2) == 0xE8);
+
+    /* Deterministic opaque payload for the round trips. */
+    static uint8_t msg[3400];
+    for (size_t i = 0; i < sizeof msg; i++) msg[i] = (uint8_t)(i * 31 + 7);
+    uint8_t out[3400]; size_t olen = 0;
+
+    /* (2) Cross-boundary: 1000 B fills the 720 B MAD1 area (sectors 1..15) and
+     * spills into MAD2 sectors 17.. -- proving sector 16 leaves no gap. */
+    memset(mfc_ram, 0, sizeof mfc_ram);
+    assert(mfc_ndef_write_sz(ram_io, NULL, 1, msg, 1000) == NCI_OK);
+
+    /* MAD1: every sector 1..15 is used -> NDEF AID; CRC matches a recompute. */
+    for (uint8_t s = 1; s <= 15; s++) {
+        int blk, off; t_mad_loc(s, &blk, &off);
+        assert(mfc_ram[blk][off] == 0x03 && mfc_ram[blk][off + 1] == 0xE1);
+    }
+    uint8_t crc1[31];
+    memcpy(crc1, &mfc_ram[1][1], 15);
+    memcpy(crc1 + 15, mfc_ram[2], 16);
+    assert(mfc_ram[1][0] == mfc_mad_crc8(crc1, sizeof crc1));
+
+    /* MAD2: Info=0, sectors 17/18/19 marked NDEF, unused 23 cleared, CRC recomputes. */
+    assert(mfc_ram[64][1] == 0x00);
+    for (uint8_t s = 17; s <= 19; s++) {
+        int blk, off; t_mad_loc(s, &blk, &off);
+        assert(mfc_ram[blk][off] == 0x03 && mfc_ram[blk][off + 1] == 0xE1);
+    }
+    { int blk, off; t_mad_loc(23, &blk, &off);
+      assert(mfc_ram[blk][off] == 0x00 && mfc_ram[blk][off + 1] == 0x00); }
+    uint8_t crc2[47];
+    memcpy(crc2, &mfc_ram[64][1], 15);
+    memcpy(crc2 + 15, mfc_ram[65], 16);
+    memcpy(crc2 + 31, mfc_ram[66], 16);
+    assert(mfc_ram[64][0] == mfc_mad_crc8(crc2, sizeof crc2));
+
+    /* The equality across the sector-16 boundary is the real proof. */
+    assert(mfc_ndef_read_sz(ram_io, NULL, 1, out, sizeof out, &olen) == NCI_OK);
+    assert(olen == 1000 && memcmp(out, msg, 1000) == 0);
+
+    /* (3) Reach the 16-block upper sectors: 3000 B occupies sectors 1..15,
+     * 17..31 and into 32.. (15 data blocks / 240 B each). */
+    memset(mfc_ram, 0, sizeof mfc_ram);
+    assert(mfc_ndef_write_sz(ram_io, NULL, 1, msg, 3000) == NCI_OK);
+    /* Sector 32's first data block is block 128; raw offset 1440 -> msg[1436]
+     * (4-byte TLV header: 03 FF <len-hi> <len-lo>). */
+    assert(mfc_ram[128][0] == msg[1436]);
+    assert(mfc_ndef_read_sz(ram_io, NULL, 1, out, sizeof out, &olen) == NCI_OK);
+    assert(olen == 3000 && memcmp(out, msg, 3000) == 0);
+
+    /* (4) Over-capacity: 3400 B (> 3360 usable) is rejected without touching the
+     * card, so the prior 3000-byte message still reads back. */
+    assert(mfc_ndef_write_sz(ram_io, NULL, 1, msg, 3400) == NCI_ERR);
+    assert(mfc_ndef_read_sz(ram_io, NULL, 1, out, sizeof out, &olen) == NCI_OK);
+    assert(olen == 3000 && memcmp(out, msg, 3000) == 0);
+
+    /* (5) Format: empty NDEF reads back as zero length and clears the stale
+     * upper-sector MAD2 entries to 00 00. */
+    assert(mfc_ndef_write_sz(ram_io, NULL, 1, NULL, 0) == NCI_OK);
+    assert(mfc_ndef_read_sz(ram_io, NULL, 1, out, sizeof out, &olen) == NCI_OK && olen == 0);
+    for (uint8_t s = 17; s <= 39; s++) {
+        int blk, off; t_mad_loc(s, &blk, &off);
+        assert(mfc_ram[blk][off] == 0x00 && mfc_ram[blk][off + 1] == 0x00);
+    }
+    printf("  mfc_ndef_4k: OK (MAD2 CRC KAT, cross-boundary + 16-block round trips, format)\n");
 }
 
 static void test_3des(void)
@@ -380,6 +475,7 @@ int main(void)
     test_ndef_qzx_uri();
     test_mifare();
     test_mfc_ndef();
+    test_mfc_ndef_4k();
     printf("all tests passed\n");
     return 0;
 }

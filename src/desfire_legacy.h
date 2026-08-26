@@ -22,10 +22,11 @@
 typedef struct {
     uint8_t  key_no;
     uint8_t  session_key[24];   /* derived session key (8/16/24 bytes) */
-    size_t   session_len;
+    size_t   session_len;       /* >0 also marks the session active */
     uint8_t  iv[8];             /* running IV after authentication */
     int      as_new;            /* 1 = ISO/AES (0x1A) session -> CRC32 + encrypt-to-send;
                                    0 = legacy D40 (0x0A) session -> CRC16 + decrypt-to-send */
+    uint8_t  last_status;       /* DESFire status of the last secure-messaging op */
 } desfire_legacy_session;
 
 /* Session-key interleave from the two challenges. Exposed (non-static) so the
@@ -50,5 +51,25 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
 int desfire_change_key_to_aes(apdu_fn fn, void *ctx, desfire_legacy_session *s,
                               uint8_t key_no, const uint8_t new_aes[16],
                               uint8_t new_version);
+
+/* ---- Legacy CommMode secure messaging (3DES ReadData / WriteData) --------- *
+ * Enciphered (NCI_DESFIRE_FULL), MACed (NCI_DESFIRE_MAC) or PLAIN file access
+ * under an active D40 (0x0A) or ISO/AS_NEW (0x1A) 3DES session `s` (session_len
+ * > 0). `comm` is the file's comm mode (NCI_DESFIRE_PLAIN/MAC/FULL). The header
+ * (fileNo || offset || length) is always sent plain; only the payload/response
+ * is protected. Any non-OK card status ends the session (session_len -> 0) and
+ * is recorded in s->last_status. The integrator routes the public
+ * nci_desfire_read_data_comm / write_data / get_value here when a legacy session
+ * is active (before the EV2 path). Internal - not part of the public ABI. */
+int desfire_legacy_read_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                             uint8_t comm, uint8_t file_no, uint32_t offset,
+                             uint32_t length, uint8_t *out, size_t out_cap,
+                             size_t *out_len);
+int desfire_legacy_write_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                              uint8_t comm, uint8_t file_no, uint32_t offset,
+                              const uint8_t *data, uint32_t len);
+/* GetValue (0x6C) of a value file under the same session/comm modes. */
+int desfire_legacy_get_value(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                             uint8_t comm, uint8_t file_no, int32_t *value);
 
 #endif /* NCI_DESFIRE_LEGACY_H */

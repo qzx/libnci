@@ -1139,15 +1139,18 @@ int nci_mfc_write_trailer(nci *d, uint8_t trailer_block,
 }
 
 /* Block-I/O seam for NDEF-over-MIFARE: auth the block's sector (Key A, MAD key
- * for sector 0 else the NDEF key) on demand, then read/write. */
+ * for the MAD sectors 0/16 else the NDEF key) on demand, then read/write. */
 struct mfc_io_ctx { nci *d; const uint8_t *mad_key, *ndef_key; int authed; };
 
 static int mfc_dev_io(void *vp, uint8_t block, uint8_t *data, int is_write)
 {
     struct mfc_io_ctx *c = vp;
-    int sector = block / 4;
+    /* 4K geometry: sectors 0..31 are 4 blocks (0..127), sectors 32..39 are 16
+     * blocks (128..255). MAD lives in sector 0 (MAD1) and sector 16 (MAD2). */
+    int sector = block < 128 ? block / 4 : 32 + (block - 128) / 16;
     if (c->authed != sector) {
-        const uint8_t *k = (sector == 0) ? c->mad_key : c->ndef_key;
+        int is_mad = (sector == 0 || sector == 16);
+        const uint8_t *k = is_mad ? c->mad_key : c->ndef_key;
         if (nci_mfc_authenticate(c->d, block, NCI_MFC_KEY_A, k) != NCI_OK) {
             c->authed = -1; return -1;
         }
@@ -1165,7 +1168,9 @@ int nci_mfc_ndef_read(nci *d, const uint8_t mad_key[6], const uint8_t ndef_key[6
     if (!d || !mad_key || !ndef_key) return NCI_E_INVAL;
     if (!mfc_tag(d)) return NCI_E_NO_TAG;
     struct mfc_io_ctx c = { d, mad_key, ndef_key, -1 };
-    return mfc_ndef_read(mfc_dev_io, &c, out, cap, out_len) == NCI_OK ? NCI_OK : NCI_ERR;
+    int is_4k = (d->conn.sak == 0x18);   /* 0x08/0x09 = 1K/Mini -> MAD1 only */
+    return mfc_ndef_read_sz(mfc_dev_io, &c, is_4k, out, cap, out_len) == NCI_OK
+               ? NCI_OK : NCI_ERR;
 }
 
 int nci_mfc_ndef_write(nci *d, const uint8_t mad_key[6], const uint8_t ndef_key[6],
@@ -1174,7 +1179,9 @@ int nci_mfc_ndef_write(nci *d, const uint8_t mad_key[6], const uint8_t ndef_key[
     if (!d || !mad_key || !ndef_key) return NCI_E_INVAL;
     if (!mfc_tag(d)) return NCI_E_NO_TAG;
     struct mfc_io_ctx c = { d, mad_key, ndef_key, -1 };
-    return mfc_ndef_write(mfc_dev_io, &c, msg, len) == NCI_OK ? NCI_OK : NCI_ERR;
+    int is_4k = (d->conn.sak == 0x18);   /* 0x08/0x09 = 1K/Mini -> MAD1 only */
+    return mfc_ndef_write_sz(mfc_dev_io, &c, is_4k, msg, len) == NCI_OK
+               ? NCI_OK : NCI_ERR;
 }
 
 int nci_mfc_format_ndef(nci *d, const uint8_t mad_key[6], const uint8_t ndef_key[6])
@@ -1206,6 +1213,7 @@ int nci_desfire_select_application(nci *p, uint32_t aid)
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
     p->ev2.active = false;   /* selecting an application ends any session */
     p->aes.active = false;
+    p->legacy.session_len = 0;
     return desfire_select_application(facade_apdu, p, aid);
 }
 
@@ -1298,8 +1306,10 @@ int nci_desfire_iso_update_binary(nci *p, uint16_t offset,
 int nci_desfire_authenticate_ev2(nci *p, uint8_t key_no, const uint8_t key[16])
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
-    p->aes.active = false;   /* EV2 and legacy-AES sessions are mutually exclusive */
+    p->aes.active = false;   /* EV2, legacy-AES and legacy-3DES are mutually exclusive */
     p->aes.last_status = 0;
+    p->legacy.session_len = 0;
+    p->legacy.last_status = 0;
     int r = desfire_ev2_authenticate(facade_apdu, p, key_no, key, &p->ev2);
     if (r == NCI_OK)
         p->ev2.frame_size = p->conn.frame_size;
@@ -1318,6 +1328,8 @@ int nci_desfire_authenticate_aes(nci *p, uint8_t key_no, const uint8_t key[16])
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
     p->ev2.active = false;   /* legacy-AES establishes its own (non-EV2) channel */
     p->ev2.last_status = 0;
+    p->legacy.session_len = 0;
+    p->legacy.last_status = 0;
     return desfire_aes_authenticate(facade_apdu, p, key_no, key, &p->aes);
 }
 
@@ -1325,7 +1337,10 @@ int nci_desfire_authenticate_iso(nci *p, uint8_t key_no,
                                     const uint8_t *key, size_t key_len)
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
-    p->ev2.active = false;   /* legacy auth establishes its own (non-EV2) channel */
+    p->ev2.active = false;   /* legacy-3DES establishes its own (non-EV2) channel */
+    p->ev2.last_status = 0;
+    p->aes.active = false;   /* mutually exclusive with an EV2 / legacy-AES session */
+    p->aes.last_status = 0;
     return desfire_auth_iso(facade_apdu, p, key_no, key, key_len, &p->legacy);
 }
 
@@ -1333,7 +1348,10 @@ int nci_desfire_authenticate_legacy(nci *p, uint8_t key_no,
                                        const uint8_t *key, size_t key_len)
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
-    p->ev2.active = false;
+    p->ev2.active = false;   /* legacy-3DES establishes its own (non-EV2) channel */
+    p->ev2.last_status = 0;
+    p->aes.active = false;   /* mutually exclusive with an EV2 / legacy-AES session */
+    p->aes.last_status = 0;
     return desfire_auth_legacy(facade_apdu, p, key_no, key, key_len, &p->legacy);
 }
 
@@ -1341,6 +1359,8 @@ int nci_desfire_authenticate_lrp(nci *p, uint8_t key_no, const uint8_t key[16])
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
     p->ev2.active = false;   /* LRP establishes its own (non-EV2) channel */
+    p->aes.active = false;
+    p->legacy.session_len = 0;
     return desfire_lrp_authenticate_first(facade_apdu, p, key_no, key, &p->lrp);
 }
 
@@ -1504,10 +1524,12 @@ bool nci_desfire_session_active(nci *p)
 uint8_t nci_desfire_last_status(nci *p)
 {
     if (!p) return 0;
-    /* The two secure channels are mutually exclusive (each authenticate clears
-     * the other's status). A non-zero legacy-AES status is the last AES error;
-     * otherwise fall back to the EV2 channel. */
-    return p->aes.last_status ? p->aes.last_status : p->ev2.last_status;
+    /* The secure channels are mutually exclusive (each authenticate clears the
+     * others' status). Report whichever holds the last non-OK status: legacy-AES
+     * (0xAA), then legacy/ISO 3DES (0x0A/0x1A), then the EV2 channel. */
+    if (p->aes.last_status)    return p->aes.last_status;
+    if (p->legacy.last_status) return p->legacy.last_status;
+    return p->ev2.last_status;
 }
 
 int nci_desfire_read_data_full(nci *p, uint8_t file_no, uint32_t offset,
@@ -1625,6 +1647,9 @@ int nci_desfire_write_data(nci *p, uint8_t comm, uint8_t file_no,
     if (p && p->aes.active)
         return desfire_aes_write_data(facade_apdu, p, &p->aes, comm, file_no,
                                       offset, data, len);
+    if (p && p->legacy.session_len)
+        return desfire_legacy_write_data(facade_apdu, p, &p->legacy, comm, file_no,
+                                         offset, data, len);
     EV2_GUARD(p);
     return desfire_ev2_write_data(facade_apdu, p, &p->ev2, comm, file_no,
                                   offset, data, len);
@@ -1647,6 +1672,9 @@ int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
     if (p && p->aes.active)
         return desfire_aes_read_data(facade_apdu, p, &p->aes, comm, file_no,
                                      offset, length, out, out_cap, out_len);
+    if (p && p->legacy.session_len)
+        return desfire_legacy_read_data(facade_apdu, p, &p->legacy, comm, file_no,
+                                        offset, length, out, out_cap, out_len);
     EV2_GUARD(p);
     return desfire_ev2_read_data(facade_apdu, p, &p->ev2, comm, file_no, offset,
                                  length, out, out_cap, out_len);
@@ -1736,6 +1764,8 @@ int nci_desfire_get_value(nci *p, uint8_t comm, uint8_t file_no, int32_t *value)
 {
     if (p && p->aes.active)
         return desfire_aes_get_value(facade_apdu, p, &p->aes, comm, file_no, value);
+    if (p && p->legacy.session_len)
+        return desfire_legacy_get_value(facade_apdu, p, &p->legacy, comm, file_no, value);
     EV2_GUARD(p);
     return desfire_ev3_get_value(facade_apdu, p, &p->ev2, comm, file_no, value);
 }
