@@ -18,13 +18,39 @@
 #include "chipset.h"
 #include "log.h"
 
-/* Post-init configuration hook. Deliberate no-op: the stock NCI bring-up polls
- * all technologies with sane defaults (validated on the PN7160, same NCI RF
- * config path). PN7150-specific CORE_SET_CONFIG / RF tuning would land here. */
+/* Post-init configuration hook (impl.txt #122 RF parameter tuning). Runs after
+ * CORE_INIT and before RF_DISCOVER_MAP.
+ *
+ * Same standard NCI CORE_SET_CONFIG path as the PN7160, but tuned for the
+ * PN7150's mains-/bus-powered role: a SHORTER TOTAL_DURATION (config ID 0x00,
+ * 2 octets, ms, little-endian) restarts the discovery loop more often for
+ * snappier tag pickup - current draw is not the constraint here. TOTAL_DURATION
+ * is a spec-stable NCI config value and works on the PN7150's NCI 1.0 core.
+ * The value is illustrative/tunable and is NOT hardware-validated here.
+ *
+ * NOT DONE (needs the NXP reference config): proprietary RF analog tuning /
+ * retries via vendor-specific config IDs - not fabricated; they append to the
+ * TLV list below when the UM11495 values are on hand. */
 static int pn7150_configure(nci_transport *t, const nci_dev_info *info)
 {
-    (void)t;
-    LOGD("nci: configure pn7150 (nci_ver 0x%02x) - using NCI defaults",
+    if (!t) return NCI_E_INVAL;
+
+    /* CORE_SET_CONFIG: 1 param, TOTAL_DURATION = 500 ms (0x01F4, little-endian). */
+    static const uint8_t set_cfg[] = {
+        0x20, 0x02, 0x05, 0x01, 0x00, 0x02, 0xF4, 0x01,
+    };
+    uint8_t rsp[64];
+    size_t  rlen = 0;
+    int rc = nci_chip_command(t, set_cfg, sizeof set_cfg, rsp, sizeof rsp, &rlen);
+    if (rc != NCI_OK) {
+        LOGE("pn7150: CORE_SET_CONFIG failed (%d)", rc);
+        return rc;
+    }
+    if (rlen < 4 || rsp[3] != 0x00) {                  /* status octet */
+        LOGE("pn7150: CORE_SET_CONFIG status 0x%02x", rlen >= 4 ? rsp[3] : 0xFF);
+        return NCI_E_STATUS;
+    }
+    LOGD("pn7150: configure ok (nci_ver 0x%02x) - discovery period tuned",
          info ? info->nci_version : 0);
     return NCI_OK;
 }

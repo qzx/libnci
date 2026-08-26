@@ -36,6 +36,15 @@ typedef struct nci_chip {
     int (*configure)(nci_transport *t, const nci_dev_info *info);
 } nci_chip;
 
+/* Send one NCI command over the transport and wait for its matching RSP,
+ * skipping any notifications that arrive first. On success returns NCI_OK and
+ * (if rsp_len non-NULL) the RSP length; the RSP is copied into rsp[0..rsp_cap).
+ * A small self-contained helper so chipset configure hooks can push their own
+ * CORE_SET_CONFIG without reaching into nci.c's private command(). */
+int nci_chip_command(nci_transport *t,
+                     const uint8_t *cmd, size_t cmd_len,
+                     uint8_t *rsp, size_t rsp_cap, size_t *rsp_len);
+
 /* Registry access (defined in chipset.c). */
 const nci_chip *nci_chip_find(const char *name);   /* NULL => default chip   */
 const nci_chip *nci_chip_at(size_t index);
