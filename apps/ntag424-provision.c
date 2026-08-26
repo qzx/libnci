@@ -291,7 +291,8 @@ int main(int argc, char **argv)
     nci_sdm_settings s;
     memset(&s, 0, sizeof s);
     s.sdm_options       = 0xC1;     /* UID + ReadCtr present, ASCII encoding   */
-    s.sdm_access_rights = (uint16_t)((SDM_KEY_NO << 12) | (SDM_KEY_NO << 8) | 0xFF);
+    /* AN12196 nibble layout: RFU@15-12, SDMMetaRead@11-8, SDMFileRead@7-4, CtrRet@3-0 */
+    s.sdm_access_rights = (uint16_t)((SDM_KEY_NO << 8) | (SDM_KEY_NO << 4) | 0x0F);
     s.picc_data_offset      = picc_off;
     s.sdm_mac_input_offset  = mac_off;   /* == mac offset -> empty CMAC input   */
     s.sdm_mac_offset        = mac_off;

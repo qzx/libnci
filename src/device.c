@@ -309,6 +309,7 @@ const char *nci_device_info(nci *d)
 int nci_start_discovery(nci *d, uint32_t tech_mask)
 {
     if (!d) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to discover */
     d->tech_mask = tech_mask ? tech_mask : NCI_TECH_ALL;
     return nci_rf_discover_mask(d->t, d->tech_mask);
 }
@@ -355,6 +356,7 @@ static int activate_target(nci *d, size_t idx, nci_tag *out)
 int nci_poll(nci *d, nci_tag *out, int timeout_ms)
 {
     if (!d || !out) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to poll */
     if (d->abort_flag) { d->abort_flag = 0; return NCI_E_ABORTED; }
 
     d->n_targets = 0;
@@ -466,6 +468,7 @@ static void census_rearm(nci *d)
 int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms)
 {
     if (!d) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to census */
     nci_tag tag;
     census_run(d, &tag, timeout_ms > 0 ? timeout_ms : 500);
     int n = nci_list_targets(d, out, cap);
@@ -481,6 +484,7 @@ int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms)
 int nci_select_uid(nci *d, const uint8_t *uid, uint8_t uid_len, nci_tag *out)
 {
     if (!d || !uid || !uid_len || uid_len > NCI_MAX_UID_LEN) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to select */
     nci_tag tag;
     for (int attempt = 0; attempt < 2; attempt++) {
         int r = census_run(d, &tag, 500);
@@ -527,6 +531,7 @@ int nci_list_targets(nci *d, nci_tag *out, size_t cap)
 bool nci_tag_present(nci *d)
 {
     if (!d || !d->conn.activated) return false;
+    if (!d->t) return false;   /* headless handle: no local NFCC to ping the tag */
 
     /* RF-level ping: put the tag to sleep, then re-select it. A tag still in
      * the field re-activates; one that has left does not. This re-activates the
@@ -556,6 +561,7 @@ int nci_rf_interface_of(nci *d)
 int nci_switch_rf_interface(nci *d, nci_rf_interface iface)
 {
     if (!d) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to re-select */
     if (!d->conn.activated) return NCI_E_NO_TAG;
     if ((uint8_t)iface == d->conn.rf_interface) return NCI_OK;   /* already there */
 
@@ -574,6 +580,7 @@ int nci_switch_rf_interface(nci *d, nci_rf_interface iface)
 int nci_deactivate(nci *d, nci_deactivate_mode mode)
 {
     if (!d) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to deactivate */
     if (mode == NCI_DEACT_IDLE || mode == NCI_DEACT_DISCOVERY) {
         d->conn.activated = false;
         d->ev2.active = false;
@@ -599,6 +606,20 @@ int nci_abort(nci *d)
 int nci_get_capabilities(nci *d, nci_capabilities *out)
 {
     if (!d || !out) return NCI_E_INVAL;
+    if (!d->chip) {
+        /* Headless (nci_open_apdu) handle: no local NFCC, so there is no chipset
+         * caps octet to consult. The delegate transceive only carries wrapped
+         * ISO-DEP APDUs, so present that: ISO-DEP only, no poll/listen/dep/fw. */
+        memset(out, 0, sizeof *out);
+        out->poll_tech   = 0;
+        out->protocols   = NCI_PROTO_MASK_ISODEP;
+        out->listen_mode = false;
+        out->nfc_dep     = false;
+        out->fw_update   = false;
+        out->nci_version = d->info.nci_version;
+        out->max_apdu    = 255;
+        return NCI_OK;
+    }
     uint32_t caps = d->chip->info.caps;
     memset(out, 0, sizeof *out);
     out->poll_tech   = NCI_TECH_A | NCI_TECH_B | NCI_TECH_F | NCI_TECH_V;
@@ -700,6 +721,26 @@ int nci_transceive(nci *d, const uint8_t *tx, size_t tx_len,
     size_t rl = 0;
     int r = nci_apdu_xchg(d->t, &d->conn, tx, tx_len, rx, rx_cap, &rl,
                            timeout_ms < 0 ? 1000 : timeout_ms);
+    if (d->abort_flag) { d->abort_flag = 0; return NCI_E_ABORTED; }
+    if (r < 0)  return d->conn.activated ? NCI_E_IO : NCI_E_TAG_GONE;
+    if (r == 0) return NCI_POLL_NONE;     /* tag gave nothing */
+    return (int)rl;
+}
+
+int nci_transceive_raw(nci *d, const uint8_t *tx, size_t tx_len,
+                       uint8_t *rx, size_t rx_cap, int timeout_ms)
+{
+    if (!d || !tx || !rx) return NCI_E_INVAL;
+    if (d->abort_flag) { d->abort_flag = 0; return NCI_E_ABORTED; }
+    /* Headless (nci_open_apdu) handle: no local NFCC to drive a raw RF frame; the
+     * delegate pipe carries only wrapped ISO-DEP APDUs. */
+    if (d->remote_apdu || !d->t) return NCI_E_NOTSUP;
+    if (!d->conn.activated) return NCI_E_NO_TAG;
+    /* No ISO-DEP gate: exchange over whatever RF interface the tag is on (Frame or
+     * ISO-DEP), for the T2T/T3T/T5T tag-type command layers that are not ISO-DEP. */
+    size_t rl = 0;
+    int r = nci_data_xchg(d->t, &d->conn, tx, tx_len, rx, rx_cap, &rl,
+                          timeout_ms < 0 ? 1000 : timeout_ms);
     if (d->abort_flag) { d->abort_flag = 0; return NCI_E_ABORTED; }
     if (r < 0)  return d->conn.activated ? NCI_E_IO : NCI_E_TAG_GONE;
     if (r == 0) return NCI_POLL_NONE;     /* tag gave nothing */
@@ -1264,6 +1305,15 @@ int nci_desfire_create_std_data_file(nci *p, uint8_t file_no, int iso_file_id,
                                             iso_file_id, comm, access_rights, size);
 }
 
+int nci_desfire_create_std_data_file_sdm(nci *p, uint8_t file_no, int iso_file_id,
+                                         uint8_t file_option, uint16_t access_rights,
+                                         uint32_t size, const uint8_t *sdm_data, size_t sdm_len)
+{
+    EV2_GUARD(p);
+    return desfire_ev2_create_std_data_file_sdm(facade_apdu, p, &p->ev2, file_no, iso_file_id,
+                                                file_option, access_rights, size, sdm_data, sdm_len);
+}
+
 int nci_desfire_delete_file(nci *p, uint8_t file_no)
 {
     EV2_GUARD(p);
@@ -1276,6 +1326,16 @@ int nci_desfire_write_data(nci *p, uint8_t comm, uint8_t file_no,
     EV2_GUARD(p);
     return desfire_ev2_write_data(facade_apdu, p, &p->ev2, comm, file_no,
                                   offset, data, len);
+}
+
+void nci_desfire_set_write_ins(nci *p, uint8_t ins)
+{
+    if (p) p->ev2.write_ins = ins;
+}
+
+void nci_desfire_set_read_ins(nci *p, uint8_t ins)
+{
+    if (p) p->ev2.read_ins = ins;
 }
 
 int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
@@ -1347,6 +1407,14 @@ int nci_desfire_change_key(nci *p, uint8_t key_no, const uint8_t old_key[16],
     EV2_GUARD(p);
     return desfire_ev2_change_key(facade_apdu, p, &p->ev2, key_no, old_key,
                                   new_key, new_version);
+}
+
+int nci_desfire_change_key_to_aes(nci *p, uint8_t key_no,
+                                     const uint8_t new_aes[16], uint8_t new_version)
+{
+    if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
+    return desfire_change_key_to_aes(facade_apdu, p, &p->legacy, key_no,
+                                     new_aes, new_version);
 }
 
 /* ---- DESFire EV3: value / record / transaction wrappers --------------- */

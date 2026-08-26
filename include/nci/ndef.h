@@ -30,9 +30,9 @@ extern "C" {
 
 typedef struct {
     uint8_t        tnf;
-    uint8_t        type[32];
+    uint8_t        type[255];   /* NDEF type_len is 8-bit: hold the full range */
     uint8_t        type_len;
-    uint8_t        id[32];
+    uint8_t        id[255];     /* NDEF id_len is 8-bit: hold the full range   */
     uint8_t        id_len;
     const uint8_t *payload;     /* points into the source message */
     size_t         payload_len;

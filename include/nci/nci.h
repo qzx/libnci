@@ -308,6 +308,14 @@ bool nci_tag_supports_apdu(nci *d);
 int nci_transceive(nci *d, const uint8_t *tx, size_t tx_len,
                    uint8_t *rx, size_t rx_cap, int timeout_ms);
 
+/* Exchange one raw RF frame with the active tag over its CURRENT RF interface
+ * (Frame or ISO-DEP), for tag-type command layers (T2T/T3T/T5T) that are not
+ * ISO-DEP. Returns response length >=0, 0 if the tag is silent, or a negative
+ * nci_status. For a headless (nci_open_apdu) handle where no local NFCC exists,
+ * returns NCI_E_NOTSUP. timeout_ms < 0 uses a 1 s default. */
+int nci_transceive_raw(nci *d, const uint8_t *tx, size_t tx_len,
+                       uint8_t *rx, size_t rx_cap, int timeout_ms);
+
 /* ---- NFC Forum Type 4 Tag NDEF (impl.txt #24-27) ---------------------- *
  * Operate on the activated ISO-DEP Type 4 tag (NTAG 424 DNA, a DESFire with an
  * NDEF application, ...). */

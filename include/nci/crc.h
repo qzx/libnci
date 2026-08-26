@@ -41,7 +41,7 @@ void nci_crc_felica_append(uint8_t *data, size_t len, size_t *out_len);
 typedef struct {
     uint8_t  tl;                 /* length byte (incl. itself)              */
     uint8_t  fsci;               /* frame-size-for-card index (T0 low nibble)*/
-    uint16_t fsc;                /* decoded FSC in bytes (16..256)          */
+    uint16_t fsc;                /* decoded FSC in bytes (16..4096)         */
     bool     ta1_present, tb1_present, tc1_present;
     uint8_t  ta1, tb1, tc1;
     uint8_t  sfgi;               /* start-up frame guard time index (TB1 lo) */

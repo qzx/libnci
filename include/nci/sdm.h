@@ -76,7 +76,8 @@ int nci_sdm_verify(const uint8_t meta_key[16], const uint8_t file_key[16],
 
 typedef struct {
     uint8_t  sdm_options;          /* SDMOptions (Bit 7: UID, Bit 6: Ctr, Bit 5: CtrLimit, Bit 4: EncData, Bit 0: EncMode) */
-    uint16_t sdm_access_rights;    /* SDMAccessRights (MetaRead: 15-12, FileRead: 11-8, CtrRet: 3-0) */
+    uint16_t sdm_access_rights;    /* SDMAccessRights, AN12196 §4.4 nibble order:
+                                      RFU 15-12, SDMMetaRead 11-8, SDMFileRead 7-4, CtrRet 3-0 */
     uint32_t uid_offset;
     uint32_t sdm_read_ctr_offset;
     uint32_t picc_data_offset;

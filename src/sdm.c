@@ -169,8 +169,10 @@ int nci_sdm_encode_settings(const nci_sdm_settings *s, uint8_t *out, size_t out_
     out[i++] = (uint8_t)(s->sdm_access_rights & 0xFF);
     out[i++] = (uint8_t)((s->sdm_access_rights >> 8) & 0xFF);
 
-    uint8_t meta_read = (uint8_t)((s->sdm_access_rights >> 12) & 0x0F);
-    uint8_t file_read = (uint8_t)((s->sdm_access_rights >> 8) & 0x0F);
+    /* AN12196 §4.4 SDMAccessRights nibbles: RFU[15-12] SDMMetaRead[11-8]
+     * SDMFileRead[7-4] CtrRet[3-0]. The two serialized bytes are LSB-first. */
+    uint8_t meta_read = (uint8_t)((s->sdm_access_rights >> 8) & 0x0F);
+    uint8_t file_read = (uint8_t)((s->sdm_access_rights >> 4) & 0x0F);
 
     /* UIDOffset: present if ((SDMOptions[Bit 7] = 1b) AND (SDMMetaRead access right = Eh)) */
     if ((s->sdm_options & 0x80) && (meta_read == 0x0E)) {

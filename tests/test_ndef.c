@@ -180,6 +180,117 @@ static void test_wifi_wsc(void)
     printf("  wifi_wsc: OK\n");
 }
 
+static void test_text_utf16(void)
+{
+    /* UTF-16 Text records (status bit 7). "Hi" as UTF-16 has embedded 0x00
+     * bytes that a UTF-8 memcpy would truncate at. */
+    ndef_record r;
+    char text[32], lang[8];
+
+    /* Big-endian, no BOM (RTD Text default). */
+    const uint8_t be[] = {
+        0xD1, 0x01, 0x07, 'T',
+        0x82, 'e', 'n',                 /* status 0x82: UTF-16, lang len 2   */
+        0x00, 0x48, 0x00, 0x69,         /* "Hi" UTF-16 BE                    */
+    };
+    assert(ndef_first_record(be, sizeof be, &r) == 0 && ndef_is_text(&r));
+    assert(ndef_get_text(&r, text, sizeof text, lang, sizeof lang) == 2);
+    assert(strcmp(text, "Hi") == 0 && strcmp(lang, "en") == 0);
+
+    /* Little-endian, explicit BOM. */
+    const uint8_t le[] = {
+        0xD1, 0x01, 0x09, 'T',
+        0x82, 'e', 'n',
+        0xFF, 0xFE,                     /* BOM -> little-endian              */
+        0x48, 0x00, 0x69, 0x00,         /* "Hi" UTF-16 LE                    */
+    };
+    assert(ndef_first_record(le, sizeof le, &r) == 0);
+    assert(ndef_get_text(&r, text, sizeof text, lang, sizeof lang) == 2);
+    assert(strcmp(text, "Hi") == 0);
+    printf("  text_utf16: OK\n");
+}
+
+static void test_decoder_overflow(void)
+{
+    /* The header promises <0 on overflow, not silent truncation. */
+    uint8_t msg[64];
+    ndef_record r;
+
+    int n = ndef_build_uri("https://nxp.com", msg, sizeof msg);   /* 15 chars */
+    assert(n > 0 && ndef_first_record(msg, (size_t)n, &r) == 0);
+    char small[5];
+    assert(ndef_get_uri(&r, small, sizeof small) < 0);            /* would truncate */
+    char big[32];
+    assert(ndef_get_uri(&r, big, sizeof big) == 15);
+
+    n = ndef_build_text("en", "Hello", msg, sizeof msg);
+    assert(n > 0 && ndef_first_record(msg, (size_t)n, &r) == 0);
+    char t3[3];
+    assert(ndef_get_text(&r, t3, sizeof t3, NULL, 0) < 0);        /* "Hello" > 2 */
+    char t8[8];
+    assert(ndef_get_text(&r, t8, sizeof t8, NULL, 0) == 5);
+    printf("  decoder_overflow: OK\n");
+}
+
+static void test_long_type(void)
+{
+    /* A record with a 40-byte MIME type must parse AND not abort iteration of
+     * the following records. */
+    uint8_t msg[64];
+    size_t w = 0;
+    msg[w++] = 0x92;               /* MB|SR|MIME, not ME (a record follows)  */
+    msg[w++] = 40;                 /* type_len                               */
+    msg[w++] = 1;                  /* payload_len                            */
+    for (int k = 0; k < 40; k++) msg[w++] = 'x';
+    msg[w++] = 0xAB;               /* payload                                */
+    /* second record: ME|SR well-known Text "Y" */
+    msg[w++] = 0x51;              /* ME|SR|WELL_KNOWN                        */
+    msg[w++] = 1;
+    msg[w++] = 4;
+    msg[w++] = 'T';
+    msg[w++] = 0x02; msg[w++] = 'e'; msg[w++] = 'n'; msg[w++] = 'Y';
+
+    size_t cursor = 0;
+    ndef_record r;
+    int idx = 0;
+    while (ndef_next_record(msg, w, &cursor, &r) == 0) {
+        if (idx == 0) {
+            assert(r.is_first && ndef_is_mime(&r) && r.type_len == 40);
+            char mt[64];
+            assert(ndef_get_mime_type(&r, mt, sizeof mt) == 40);
+        }
+        if (idx == 1) {
+            assert(r.is_last && ndef_is_text(&r));
+            char text[8];
+            assert(ndef_get_text(&r, text, sizeof text, NULL, 0) == 1);
+            assert(strcmp(text, "Y") == 0);
+        }
+        idx++;
+    }
+    assert(idx == 2);              /* long type did not kill the second record */
+    printf("  long_type: OK\n");
+}
+
+static void test_defragment_id(void)
+{
+    /* Chunked "T" record carrying an ID on the first chunk: the rebuilt record
+     * must keep that ID. */
+    const uint8_t chunked[] = {
+        0xB9, 0x01, 0x02, 0x01, 'T', 'X', 'A', 'B',  /* MB|CF|SR|IL, id 'X'  */
+        0x56, 0x00, 0x02, 'C', 'D',                  /* ME|SR, UNCHANGED     */
+    };
+    uint8_t flat[64];
+    int n = ndef_defragment(chunked, sizeof chunked, flat, sizeof flat);
+    assert(n > 0);
+    ndef_record r;
+    assert(ndef_first_record(flat, (size_t)n, &r) == 0);
+    assert(r.is_first && r.is_last && !r.is_chunk);
+    assert(r.type_len == 1 && r.type[0] == 'T');
+    assert(r.id_len == 1 && r.id[0] == 'X');
+    assert(r.payload_len == 4 && memcmp(r.payload, "ABCD", 4) == 0);
+    printf("  defragment_id: OK\n");
+}
+
 int main(void)
 {
     printf("test_ndef:\n");
@@ -192,6 +303,10 @@ int main(void)
     test_bt_oob();
     test_handover_select();
     test_wifi_wsc();
+    test_text_utf16();
+    test_decoder_overflow();
+    test_long_type();
+    test_defragment_id();
     printf("all tests passed\n");
     return 0;
 }

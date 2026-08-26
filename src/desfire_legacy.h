@@ -24,6 +24,8 @@ typedef struct {
     uint8_t  session_key[24];   /* derived session key (8/16/24 bytes) */
     size_t   session_len;
     uint8_t  iv[8];             /* running IV after authentication */
+    int      as_new;            /* 1 = ISO/AES (0x1A) session -> CRC32 + encrypt-to-send;
+                                   0 = legacy D40 (0x0A) session -> CRC16 + decrypt-to-send */
 } desfire_legacy_session;
 
 /* AuthenticateISO (0x1A): standard (2K/3K)3DES. key_len 16 or 24. */
@@ -35,5 +37,10 @@ int desfire_auth_iso(apdu_fn fn, void *ctx, uint8_t key_no,
 int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
                         const uint8_t *key, size_t key_len,
                         desfire_legacy_session *s);
+
+/* ChangeKey `key_no` to AES-128 under an active ISO(0x1A) session (same key). */
+int desfire_change_key_to_aes(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                              uint8_t key_no, const uint8_t new_aes[16],
+                              uint8_t new_version);
 
 #endif /* NCI_DESFIRE_LEGACY_H */

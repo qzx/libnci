@@ -8,9 +8,11 @@
  */
 #include "nci/crc.h"
 
-/* FSCI -> FSC (bytes), shared by ATS and ATQB (ISO 14443-4 table). */
+/* FSCI -> FSC (bytes), shared by ATS and ATQB (ISO 14443-3:2016 table).
+ * 0..8 = 16,24,32,40,48,64,96,128,256; 9..12 = 512,1024,2048,4096;
+ * 13..15 are RFU and are conservatively decoded as the 4096 maximum. */
 static const uint16_t FSCI_TO_FSC[16] = {
-    16, 24, 32, 40, 48, 64, 96, 128, 256, 256, 256, 256, 256, 256, 256, 256,
+    16, 24, 32, 40, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096, 4096, 4096, 4096,
 };
 
 /* Reflected CRC core (poly 0x8408 == reflected 0x1021), LSB-first. Used by
@@ -129,9 +131,13 @@ int nci_parse_ats(const uint8_t *ats, size_t len, nci_ats_info *out)
 int nci_parse_atqb(const uint8_t *sensb, size_t len, nci_atqb_info *out)
 {
     if (!sensb || !out) return -1;
-    /* Skip an optional leading 0x50 tag byte. */
-    if (len >= 13 && sensb[0] == 0x50) { sensb++; len--; }
-    if (len < 12) return -1;
+    /* SENSB_RES may or may not carry the leading 0x50 start byte. Strip it
+     * only when doing so still leaves a full body (>= 11 bytes: PUPI[4] +
+     * AppData[4] + ProtoInfo[3]). This parses both the bare body and the
+     * 0x50-prefixed form regardless of total length, where the old
+     * len >= 13 guard shifted every field by one on a 12-byte SENSB_RES. */
+    if (len >= 12 && sensb[0] == 0x50) { sensb++; len--; }
+    if (len < 11) return -1;
 
     for (int k = 0; k < 4; k++) out->pupi[k]     = sensb[k];
     for (int k = 0; k < 4; k++) out->app_data[k] = sensb[4 + k];

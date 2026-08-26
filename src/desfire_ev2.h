@@ -30,6 +30,12 @@ typedef struct {
     uint16_t cmd_ctr;        /* command counter */
     uint16_t frame_size;     /* ISO 14443-4 FSC (64..256); bounds read/write chunks */
     uint8_t  last_status;    /* DESFire status byte of the last transact (0 = OK) */
+    uint8_t  write_ins;      /* WriteData INS override: 0 = classic 0x3D (DESFire).
+                                NTAG 424 DNA has no 0x3D - its ONLY write is 0x8D
+                                (0x911C ILLEGAL_COMMAND otherwise, bench 2026-08-25) */
+    uint8_t  read_ins;       /* ReadData INS override: 0 = classic 0xBD (DESFire).
+                                NTAG 424 DNA native ReadData is 0xAD - a MAC/Full
+                                secure read answers 0x911C ILLEGAL_COMMAND otherwise. */
 } desfire_ev2_session;
 
 /* AuthenticateEV2First with an AES-128 key. On success *s holds a live
@@ -112,6 +118,10 @@ int desfire_ev2_create_std_data_file(apdu_fn fn, void *ctx, desfire_ev2_session 
                                      uint8_t file_no, int iso_file_id,
                                      uint8_t comm_settings, uint16_t access_rights,
                                      uint32_t size);
+int desfire_ev2_create_std_data_file_sdm(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                         uint8_t file_no, int iso_file_id,
+                                         uint8_t file_option, uint16_t access_rights,
+                                         uint32_t size, const uint8_t *sdm_data, size_t sdm_len);
 int desfire_ev2_delete_file(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                             uint8_t file_no);
 

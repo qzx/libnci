@@ -215,9 +215,22 @@ int nci_desfire_get_free_memory(nci *p, uint32_t *bytes);
 int nci_desfire_create_std_data_file(nci *p, uint8_t file_no, int iso_file_id,
                                         uint8_t comm, uint16_t access_rights,
                                         uint32_t size);
+/* CreateStdDataFile with SDM enabled at creation (EV3 requires SDM be set at file
+ * creation; ChangeFileSettings cannot add SDM later). file_option must include bit6
+ * (0x40); sdm_data = encoded SDM parameter block (e.g. from nci_sdm_encode_settings). */
+int nci_desfire_create_std_data_file_sdm(nci *p, uint8_t file_no, int iso_file_id,
+                                         uint8_t file_option, uint16_t access_rights,
+                                         uint32_t size, const uint8_t *sdm_data, size_t sdm_len);
 int nci_desfire_delete_file(nci *p, uint8_t file_no);
 int nci_desfire_write_data(nci *p, uint8_t comm, uint8_t file_no,
                               uint32_t offset, const uint8_t *data, uint32_t len);
+/* WriteData INS override for the LIVE EV2 session: 0 = classic 0x3D (DESFire).
+ * NTAG 424 DNA has no 0x3D - pass 0x8D after authenticating it (re-auth resets to 0). */
+void nci_desfire_set_write_ins(nci *p, uint8_t ins);
+/* ReadData INS override for the LIVE EV2 session: 0 restores classic 0xBD (DESFire).
+ * NTAG 424 DNA native ReadData is 0xAD - pass 0xAD after authenticating it so
+ * MAC/Full secure reads don't answer 0x911C (re-auth resets to 0). */
+void nci_desfire_set_read_ins(nci *p, uint8_t ins);
 int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
                                   uint32_t offset, uint32_t length, uint8_t *out,
                                   size_t out_cap, size_t *out_len);
@@ -236,6 +249,13 @@ int nci_desfire_format_ndef(nci *p, const uint8_t key[16], const char *url,
 int nci_desfire_get_key_version(nci *p, uint8_t key_no, uint8_t *version);
 int nci_desfire_change_key(nci *p, uint8_t key_no, const uint8_t old_key[16],
                               const uint8_t new_key[16], uint8_t new_version);
+
+/* Fresh-card bootstrap: change `key_no` to an AES-128 key under an active
+ * legacy/ISO (0x1A) session — i.e. convert the factory 2K3DES PICC master key
+ * to AES. Authenticate first with nci_desfire_authenticate_iso(p, key_no,
+ * <16 zero bytes>, 16). Ends the session. Returns NCI_OK / NCI_ERR. */
+int nci_desfire_change_key_to_aes(nci *p, uint8_t key_no,
+                                     const uint8_t new_aes[16], uint8_t new_version);
 
 /* ---- EV3: value files (requires an active session) ------------------- *
  * comm is NCI_DESFIRE_PLAIN/MAC/FULL. Values are signed 32-bit. */

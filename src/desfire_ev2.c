@@ -383,12 +383,13 @@ static int read_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm,
     le24(hdr + 4, length);
     uint8_t buf[512]; size_t n = 0;
     bool dec = (comm == DF_COMM_FULL);
+    uint8_t ins = s->read_ins ? s->read_ins : INS_READ_DATA;  /* NTAG 424 knows only 0xAD */
     if (comm == DF_COMM_PLAIN) {
         /* CommMode.Plain file: command + response are plain; CmdCtr advances. */
-        if (desfire_ev2_plain(fn, ctx, s, INS_READ_DATA, hdr, 7, buf, sizeof buf,
+        if (desfire_ev2_plain(fn, ctx, s, ins, hdr, 7, buf, sizeof buf,
                               &n) != NCI_OK)
             return NCI_ERR;
-    } else if (desfire_ev2_transact(fn, ctx, s, INS_READ_DATA, hdr, 7, NULL, 0,
+    } else if (desfire_ev2_transact(fn, ctx, s, ins, hdr, 7, NULL, 0,
                                     false, dec, buf, sizeof buf, &n) != NCI_OK) {
         return NCI_ERR;
     }
@@ -465,16 +466,17 @@ static int write_one(apdu_fn fn, void *ctx, desfire_ev2_session *s, uint8_t comm
     le24(hdr + 1, offset);
     le24(hdr + 4, len);
     uint8_t out[32]; size_t n = 0;
+    uint8_t ins = s->write_ins ? s->write_ins : 0x3D;   /* NTAG 424 knows only 0x8D */
     if (comm == DF_COMM_PLAIN) {
         /* CommMode.Plain file: header + data sent plain; CmdCtr advances. */
         uint8_t cmd[7 + 248];
         if (len > sizeof cmd - 7) return NCI_ERR;
         memcpy(cmd, hdr, 7);
         if (len) memcpy(cmd + 7, data, len);
-        return desfire_ev2_plain(fn, ctx, s, 0x3D, cmd, (uint8_t)(7 + len),
+        return desfire_ev2_plain(fn, ctx, s, ins, cmd, (uint8_t)(7 + len),
                                  out, sizeof out, &n);
     }
-    return desfire_ev2_transact(fn, ctx, s, 0x3D, hdr, 7, data, len,
+    return desfire_ev2_transact(fn, ctx, s, ins, hdr, 7, data, len,
                                 comm == DF_COMM_FULL, false, out, sizeof out, &n);
 }
 
@@ -577,6 +579,35 @@ int desfire_ev2_create_std_data_file(apdu_fn fn, void *ctx, desfire_ev2_session 
     p[i++] = (uint8_t)(access_rights & 0xFF);
     p[i++] = (uint8_t)((access_rights >> 8) & 0xFF);
     le24(p + i, size); i += 3;
+    uint8_t out[16]; size_t n = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0xCD, p, i, NULL, 0,
+                                false, false, out, sizeof out, &n);
+}
+
+/* CreateStdDataFile with SDM enabled AT CREATION (required on DESFire EV3, where
+ * ChangeFileSettings cannot add SDM to an already-plain file). file_option must have
+ * bit6 (0x40) set; sdm_data is the encoded SDM parameter block (SDMOptions |
+ * SDMAccessRights | offsets, e.g. from nci_sdm_encode_settings). MACed, not encrypted. */
+int desfire_ev2_create_std_data_file_sdm(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                         uint8_t file_no, int iso_file_id,
+                                         uint8_t file_option, uint16_t access_rights,
+                                         uint32_t size, const uint8_t *sdm_data, size_t sdm_len)
+{
+    uint8_t p[48]; size_t i = 0;
+    p[i++] = file_no;
+    if (iso_file_id >= 0) {
+        p[i++] = (uint8_t)(iso_file_id & 0xFF);
+        p[i++] = (uint8_t)((iso_file_id >> 8) & 0xFF);
+    }
+    p[i++] = file_option;
+    p[i++] = (uint8_t)(access_rights & 0xFF);
+    p[i++] = (uint8_t)((access_rights >> 8) & 0xFF);
+    le24(p + i, size); i += 3;
+    if (sdm_data && sdm_len) {
+        if (i + sdm_len > sizeof p) return NCI_ERR;
+        memcpy(p + i, sdm_data, sdm_len);
+        i += sdm_len;
+    }
     uint8_t out[16]; size_t n = 0;
     return desfire_ev2_transact(fn, ctx, s, 0xCD, p, i, NULL, 0,
                                 false, false, out, sizeof out, &n);

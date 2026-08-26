@@ -120,10 +120,11 @@ static void test_helpers(void)
 
 static void test_encode_settings(void)
 {
+    /* AN12196 §4.4 nibble order: RFU[15-12] SDMMetaRead[11-8] SDMFileRead[7-4] CtrRet[3-0]. */
     nci_sdm_settings s;
     memset(&s, 0, sizeof s);
     s.sdm_options = 0x40; /* Ctr mirror enabled */
-    s.sdm_access_rights = 0xE1FF; /* MetaRead=E (Plain), FileRead=1 (Key 1), CtrRet=F */
+    s.sdm_access_rights = 0xFE1F; /* MetaRead=E (Plain), FileRead=1 (Key 1), CtrRet=F */
     s.sdm_read_ctr_offset = 0x112233;
     s.sdm_mac_input_offset = 0x445566;
     s.sdm_mac_offset = 0x778899;
@@ -132,8 +133,8 @@ static void test_encode_settings(void)
     int n = nci_sdm_encode_settings(&s, out, sizeof out);
     assert(n == 12);
     assert(out[0] == 0x40);
-    assert(out[1] == 0xFF);
-    assert(out[2] == 0xE1);
+    assert(out[1] == 0x1F);   /* SDMAccessRights LSB */
+    assert(out[2] == 0xFE);   /* SDMAccessRights MSB */
     assert(out[3] == 0x33);
     assert(out[4] == 0x22);
     assert(out[5] == 0x11);
@@ -144,15 +145,16 @@ static void test_encode_settings(void)
     assert(out[10] == 0x88);
     assert(out[11] == 0x77);
 
-    /* Test MetaRead = 1 (Encrypted PICCData) */
+    /* Test MetaRead = 1 (Encrypted PICCData). AN12196 example 0xF121 =>
+     * MetaRead=1, FileRead=2, CtrRet=1. */
     s.sdm_options = 0xC0; /* UID and Ctr mirror enabled */
-    s.sdm_access_rights = 0x11FF; /* MetaRead=1, FileRead=1, CtrRet=F */
+    s.sdm_access_rights = 0xF121; /* MetaRead=1, FileRead=2, CtrRet=1 */
     s.picc_data_offset = 0xAABBCC;
     n = nci_sdm_encode_settings(&s, out, sizeof out);
     assert(n == 12);
     assert(out[0] == 0xC0);
-    assert(out[1] == 0xFF);
-    assert(out[2] == 0x11);
+    assert(out[1] == 0x21);   /* SDMAccessRights LSB */
+    assert(out[2] == 0xF1);   /* SDMAccessRights MSB */
     assert(out[3] == 0xCC);
     assert(out[4] == 0xBB);
     assert(out[5] == 0xAA);

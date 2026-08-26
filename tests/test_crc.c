@@ -71,6 +71,53 @@ static void test_parse_atqb(void)
     printf("  parse_atqb: OK\n");
 }
 
+static void test_parse_atqb_both_forms(void)
+{
+    /* Identical SENSB_RES body, once bare (12 bytes, PUPI[0] != 0x50) and once
+     * with the leading 0x50 start byte. Both must parse to the same fields;
+     * the old len >= 13 guard left the bare form shifted by one. */
+    const uint8_t body[] = {
+        0x11, 0x22, 0x33, 0x44,   /* PUPI                                    */
+        0xAA, 0xBB, 0xCC, 0xDD,   /* AppData                                 */
+        0x00, 0x71, 0x81,         /* ProtoInfo: bit_rate, FSCI7/proto1, ...  */
+        0x00,                     /* trailing extended byte (ignored)        */
+    };
+    uint8_t prefixed[1 + sizeof body];
+    prefixed[0] = 0x50;
+    memcpy(prefixed + 1, body, sizeof body);
+
+    nci_atqb_info a, b;
+    assert(nci_parse_atqb(body, sizeof body, &a) == 0);
+    assert(nci_parse_atqb(prefixed, sizeof prefixed, &b) == 0);
+
+    assert(memcmp(a.pupi, b.pupi, 4) == 0);
+    assert(memcmp(a.app_data, b.app_data, 4) == 0);
+    assert(a.bit_rate_cap == b.bit_rate_cap && a.fsci == b.fsci &&
+           a.fsc == b.fsc && a.protocol_type == b.protocol_type &&
+           a.fwi == b.fwi && a.adc == b.adc && a.fo == b.fo);
+
+    /* And the concrete values, verified against the bare body. */
+    assert(a.pupi[0] == 0x11 && a.pupi[3] == 0x44);
+    assert(a.app_data[0] == 0xAA && a.app_data[3] == 0xDD);
+    assert(a.bit_rate_cap == 0x00);
+    assert(a.fsci == 7 && a.fsc == 128 && a.protocol_type == 1);
+    assert(a.fwi == 8 && a.fo == 1);
+    printf("  parse_atqb_both_forms: OK\n");
+}
+
+static void test_fsci_decode(void)
+{
+    /* ISO 14443-3:2016 FSCI table via ATS T0 low nibble. */
+    nci_ats_info a;
+    const uint8_t ats9[]  = { 0x02, 0x09 };   /* FSCI 9  -> 512  */
+    const uint8_t ats12[] = { 0x02, 0x0C };   /* FSCI 12 -> 4096 */
+    const uint8_t ats13[] = { 0x02, 0x0D };   /* FSCI 13 RFU -> 4096 */
+    assert(nci_parse_ats(ats9,  sizeof ats9,  &a) == 0 && a.fsc == 512);
+    assert(nci_parse_ats(ats12, sizeof ats12, &a) == 0 && a.fsc == 4096);
+    assert(nci_parse_ats(ats13, sizeof ats13, &a) == 0 && a.fsc == 4096);
+    printf("  fsci_decode: OK\n");
+}
+
 int main(void)
 {
     printf("test_crc:\n");
@@ -78,6 +125,8 @@ int main(void)
     test_crc_append_order();
     test_parse_ats();
     test_parse_atqb();
+    test_parse_atqb_both_forms();
+    test_fsci_decode();
     printf("all tests passed\n");
     return 0;
 }

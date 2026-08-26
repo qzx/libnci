@@ -49,8 +49,19 @@ static int parse_at(const uint8_t *msg, size_t msg_len, size_t *cursor,
         if (i + 1 > msg_len) return -1;
         id_len = msg[i++];
     }
-    if (type_len > sizeof rec->type || id_len > sizeof rec->id) return -1;
-    if (i + (size_t)type_len + id_len + payload_len > msg_len) return -1;
+    /* Bounds check without any addition that can wrap size_t. payload_len is
+     * attacker-controlled (up to 4 bytes) and 'i + type_len + id_len +
+     * payload_len' overflows below msg_len on a 32-bit target (this file is
+     * also built for ESP32). Compare against the space that remains, with each
+     * subtraction guarded so it cannot wrap. type_len/id_len are 8-bit and
+     * always fit the 255-byte rec->type / rec->id buffers. */
+    if (i > msg_len) return -1;
+    size_t remaining = msg_len - i;
+    if (type_len > remaining) return -1;
+    remaining -= type_len;
+    if (id_len > remaining) return -1;
+    remaining -= id_len;
+    if (payload_len > remaining) return -1;
 
     memset(rec, 0, sizeof *rec);
     rec->tnf      = flags & F_TNF;
@@ -123,9 +134,9 @@ int ndef_is_unknown(const ndef_record *rec)
 static int copy_type_str(const ndef_record *rec, char *out, size_t out_cap)
 {
     if (!out || out_cap == 0) return -1;
-    size_t n = rec->type_len < out_cap - 1 ? rec->type_len : out_cap - 1;
-    memcpy(out, rec->type, n);
-    out[n] = '\0';
+    if (rec->type_len > out_cap - 1) return -1;   /* overflow: header promises <0 */
+    memcpy(out, rec->type, rec->type_len);
+    out[rec->type_len] = '\0';
     return (int)rec->type_len;
 }
 
@@ -146,8 +157,9 @@ int ndef_get_text(const ndef_record *rec, char *out, size_t out_cap,
 {
     if (!ndef_is_text(rec) || rec->payload_len < 1 || !out || out_cap == 0)
         return -1;
-    uint8_t status = rec->payload[0];
-    size_t  langlen = status & 0x3F;       /* bits 5..0 */
+    uint8_t status  = rec->payload[0];
+    size_t  langlen = status & 0x3F;       /* bits 5..0                     */
+    int     utf16   = (status & 0x80) != 0;/* bit 7: 0 = UTF-8, 1 = UTF-16  */
     if (1 + langlen > rec->payload_len) return -1;
 
     if (lang && lang_cap) {
@@ -157,10 +169,48 @@ int ndef_get_text(const ndef_record *rec, char *out, size_t out_cap,
     }
     const uint8_t *text = rec->payload + 1 + langlen;
     size_t text_len = rec->payload_len - 1 - langlen;
-    size_t n = text_len < out_cap - 1 ? text_len : out_cap - 1;
-    memcpy(out, text, n);
-    out[n] = '\0';
-    return (int)text_len;
+
+    if (!utf16) {
+        if (text_len > out_cap - 1) return -1;   /* overflow: header promises <0 */
+        memcpy(out, text, text_len);
+        out[text_len] = '\0';
+        return (int)text_len;
+    }
+
+    /* UTF-16 Text record (NFC Forum RTD Text): big-endian by default, an
+     * optional BOM overrides. Decode the BMP to UTF-8 so the caller gets a
+     * normal C string instead of a run truncated at the first 0x00 byte. */
+    int    be = 1;
+    size_t p  = 0;
+    if (text_len >= 2) {
+        if (text[0] == 0xFE && text[1] == 0xFF) { be = 1; p = 2; }
+        else if (text[0] == 0xFF && text[1] == 0xFE) { be = 0; p = 2; }
+    }
+    size_t w = 0;
+    for (; p + 2 <= text_len; p += 2) {
+        uint16_t u = be ? (uint16_t)(((uint16_t)text[p] << 8) | text[p + 1])
+                        : (uint16_t)(((uint16_t)text[p + 1] << 8) | text[p]);
+        uint8_t enc[3];
+        size_t  elen;
+        if (u < 0x80) {
+            enc[0] = (uint8_t)u;
+            elen = 1;
+        } else if (u < 0x800) {
+            enc[0] = (uint8_t)(0xC0 | (u >> 6));
+            enc[1] = (uint8_t)(0x80 | (u & 0x3F));
+            elen = 2;
+        } else {
+            enc[0] = (uint8_t)(0xE0 | (u >> 12));
+            enc[1] = (uint8_t)(0x80 | ((u >> 6) & 0x3F));
+            enc[2] = (uint8_t)(0x80 | (u & 0x3F));
+            elen = 3;
+        }
+        if (w + elen > out_cap - 1) return -1;   /* overflow: header promises <0 */
+        memcpy(out + w, enc, elen);
+        w += elen;
+    }
+    out[w] = '\0';
+    return (int)w;
 }
 
 /* NFC Forum URI Record Type Definition - identifier code prefixes. */
@@ -186,12 +236,10 @@ int ndef_get_uri(const ndef_record *rec, char *out, size_t out_cap)
     size_t blen = rec->payload_len - 1;
     size_t total = plen + blen;
 
-    size_t copy_pre = plen < out_cap - 1 ? plen : out_cap - 1;
-    memcpy(out, prefix, copy_pre);
-    size_t room = out_cap - 1 - copy_pre;
-    size_t copy_body = blen < room ? blen : room;
-    memcpy(out + copy_pre, rec->payload + 1, copy_body);
-    out[copy_pre + copy_body] = '\0';
+    if (total > out_cap - 1) return -1;      /* overflow: header promises <0 */
+    memcpy(out, prefix, plen);
+    memcpy(out + plen, rec->payload + 1, blen);
+    out[total] = '\0';
     return (int)total;
 }
 
@@ -260,12 +308,16 @@ int ndef_defragment(const uint8_t *msg, size_t msg_len,
             continue;
         }
 
-        /* Chunk start: remember header position, gather fragments. */
+        /* Chunk start: remember header position, gather fragments. The first
+         * chunk's ID (if any) is preserved in the rebuilt header. */
         ndef_record first = rec;
         size_t hdr = w;
-        /* reserve a long-form header (flags,type_len,4-len) + type */
-        if (w + 6 + first.type_len > out_cap) return -1;
-        w += 6 + first.type_len;
+        size_t idl = first.id_len;
+        /* reserve a long-form header (flags,type_len,4-len) + optional id_len
+         * + type + id */
+        size_t hdrlen = 6 + (idl ? 1 : 0) + first.type_len + idl;
+        if (w + hdrlen > out_cap) return -1;
+        w += hdrlen;
         size_t pstart = w;
         if (w + first.payload_len > out_cap) return -1;
         memcpy(out + w, first.payload, first.payload_len); w += first.payload_len;
@@ -281,14 +333,18 @@ int ndef_defragment(const uint8_t *msg, size_t msg_len,
             is_last = rec.is_last;
         }
         size_t total = w - pstart;
-        out[hdr]     = (uint8_t)(first.tnf | (first.is_first ? F_MB : 0) |
-                                 (is_last ? F_ME : 0));   /* long form, no SR/CF */
-        out[hdr + 1] = first.type_len;
-        out[hdr + 2] = (uint8_t)(total >> 24);
-        out[hdr + 3] = (uint8_t)(total >> 16);
-        out[hdr + 4] = (uint8_t)(total >> 8);
-        out[hdr + 5] = (uint8_t)total;
-        memcpy(out + hdr + 6, first.type, first.type_len);
+        size_t h = hdr;
+        out[h++] = (uint8_t)(first.tnf | (first.is_first ? F_MB : 0) |
+                             (is_last ? F_ME : 0) |
+                             (idl ? F_IL : 0));       /* long form, no SR/CF */
+        out[h++] = first.type_len;
+        out[h++] = (uint8_t)(total >> 24);
+        out[h++] = (uint8_t)(total >> 16);
+        out[h++] = (uint8_t)(total >> 8);
+        out[h++] = (uint8_t)total;
+        if (idl) out[h++] = (uint8_t)idl;
+        memcpy(out + h, first.type, first.type_len); h += first.type_len;
+        if (idl) memcpy(out + h, first.id, idl);
     }
     if (r < 0) return -1;
     return (int)w;
