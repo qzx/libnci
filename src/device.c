@@ -539,10 +539,24 @@ bool nci_tag_present(nci *d)
     if (!d || !d->conn.activated) return false;
     if (!d->t) return false;   /* headless handle: no local NFCC to ping the tag */
 
-    /* RF-level ping: put the tag to sleep, then re-select it. A tag still in
-     * the field re-activates; one that has left does not. This re-activates the
-     * tag (and so resets an ISO-DEP / DESFire secure session) - do not call it
-     * mid-session. Saved disc params come from the last activation. */
+    /* Non-destructive first (impl #4): on an ISO-DEP tag, an R(NAK)/empty-frame
+     * presence probe answered at the ISO 14443-4 layer leaves the application
+     * secure session (DESFire/EV2 command counter) intact — so the async monitor
+     * can watch for removal WHILE a long secure session is open. A definitive
+     * present/gone answer is used directly; only an inconclusive result (an NFCC
+     * that doesn't honour the empty frame) falls through to the destructive path. */
+    if (d->conn.rf_interface == 0x02 /* ISO-DEP */) {
+        int pr = nci_iso_dep_presence_check(d->t, &d->conn);
+        if (pr == 1) return true;                 /* still here, session preserved */
+        if (pr == 0) { d->ev2.active = false; return false; }  /* gone            */
+        /* pr < 0: inconclusive — fall through to the sleep + re-select below. */
+    }
+
+    /* Fallback (destructive): put the tag to sleep, then re-select it. A tag
+     * still in the field re-activates; one that has left does not. This
+     * re-activates the tag (and so resets an ISO-DEP / DESFire secure session) -
+     * avoid relying on it mid-session. Saved disc params are from the last
+     * activation. */
     uint8_t disc_id = d->conn.disc_id;
     uint8_t proto   = d->conn.rf_protocol;
     uint8_t iface   = d->conn.rf_interface;
@@ -629,16 +643,36 @@ int nci_get_capabilities(nci *d, nci_capabilities *out)
     uint32_t caps = d->chip->info.caps;
     memset(out, 0, sizeof *out);
     out->poll_tech   = NCI_TECH_A | NCI_TECH_B | NCI_TECH_F | NCI_TECH_V;
+    /* Frame-interface tag types are reachable whenever those techs can poll. */
     out->protocols   = NCI_PROTO_MASK_T1T | NCI_PROTO_MASK_T2T |
                        NCI_PROTO_MASK_T3T | NCI_PROTO_MASK_T5T |
                        NCI_PROTO_MASK_MIFARE;
-    if (caps & NCI_CAP_ISO_DEP) out->protocols |= NCI_PROTO_MASK_ISODEP;
-    if (caps & NCI_CAP_NFC_DEP) out->protocols |= NCI_PROTO_MASK_NFCDEP;
-    out->nfc_dep     = (caps & NCI_CAP_NFC_DEP) != 0;
+
+    /* ISO-DEP / NFC-DEP support: prefer the controller's OWN report — the
+     * Supported RF Interfaces list retained from CORE_INIT_RSP (impl #3) — and
+     * fall back to the chipset-registry caps bits when that list was not parsed. */
+    bool has_isodep = (caps & NCI_CAP_ISO_DEP) != 0;
+    bool has_nfcdep = (caps & NCI_CAP_NFC_DEP) != 0;
+    if (d->info.caps_valid && d->info.rf_interfaces) {
+        has_isodep = has_isodep || (d->info.rf_interfaces & NCI_RFI_BIT(0x02));
+        has_nfcdep = has_nfcdep || (d->info.rf_interfaces & NCI_RFI_BIT(0x03));
+    }
+    if (has_isodep) out->protocols |= NCI_PROTO_MASK_ISODEP;
+    if (has_nfcdep) out->protocols |= NCI_PROTO_MASK_NFCDEP;
+    out->nfc_dep     = has_nfcdep;
+
+    /* Listen mode and firmware download have no CORE_INIT signal, so the chipset
+     * registry stays their real source. */
     out->listen_mode = (caps & NCI_CAP_CE) != 0;
     out->fw_update   = (caps & NCI_CAP_FW_UPDATE) != 0;
     out->nci_version = d->info.nci_version;
-    out->max_apdu    = 255;
+
+    /* Max single-frame payload: the controller's reported Max Data Packet
+     * Payload Size (from CORE_INIT_RSP on NCI 2.0, else the last activation's
+     * per-connection value), falling back to 255. */
+    uint16_t maxpl = d->info.max_data_payload;
+    if (!maxpl && d->conn.max_payload) maxpl = d->conn.max_payload;
+    out->max_apdu    = maxpl ? maxpl : 255;
     return NCI_OK;
 }
 

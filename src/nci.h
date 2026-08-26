@@ -26,7 +26,21 @@ typedef struct {
     uint8_t  manuf_id;
     uint8_t  fw_info[32];
     size_t   fw_info_len;
+    /* ---- controller capabilities RETAINED from CORE_INIT_RSP (impl #3) ---- *
+     * These were previously parsed only far enough to reach the manufacturer
+     * tail and then discarded; nci_get_capabilities() now reports the real
+     * values from here instead of hardcoded ones. caps_valid gates their use. */
+    bool     caps_valid;           /* CORE_INIT parse populated the fields below */
+    uint32_t nfcc_features;        /* the 4 "NFCC Features" octets, LE-packed    */
+    uint32_t rf_interfaces;        /* bit N set = RF interface type N supported  *
+                                    * (0x01 Frame, 0x02 ISO-DEP, 0x03 NFC-DEP);  *
+                                    * 0 when the list layout was not parsed       */
+    uint8_t  max_data_payload;     /* Max Data Packet Payload Size (0 = unknown) */
 } nci_dev_info;
+
+/* Supported-RF-interface bits for nci_dev_info.rf_interfaces (interface type
+ * used directly as the bit index; proprietary 0x80 interfaces are not folded). */
+#define NCI_RFI_BIT(type)   (1u << ((type) & 0x1F))
 
 /* State of the static RF data connection (Conn ID 0) after activation.
  * Needed to exchange data (APDUs) with the tag: the NFCC handles ISO 14443-4
@@ -108,10 +122,20 @@ int nci_apdu_xchg(nci_transport *t, nci_rf_conn *conn,
                    uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms);
 
 /* Generic data exchange on Conn 0 with no RF-interface check (for the MIFARE
- * Classic proprietary command path, which is not ISO-DEP). */
+ * Classic proprietary command path, which is not ISO-DEP). A TX payload larger
+ * than the connection's Max Data Packet Payload Size is segmented into chained
+ * NCI Data Packets (PBF set on all but the last), with per-segment credits. */
 int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
                   const uint8_t *tx, size_t tx_len,
                   uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms);
+
+/* Non-destructive ISO-DEP presence check (impl #4). Sends an empty (zero-length)
+ * I-block / R(NAK)-style frame on the static RF connection and reads the reply at
+ * the ISO 14443-4 layer, WITHOUT a sleep/re-select, so an active secure session
+ * (DESFire/EV2 command counter) survives. Returns 1 = card present, 0 = card gone
+ * (conn->activated cleared), <0 = inconclusive (the NFCC gave no usable answer;
+ * the caller should fall back to a destructive re-select). */
+int nci_iso_dep_presence_check(nci_transport *t, nci_rf_conn *conn);
 
 /* Parse an RF_INTF_ACTIVATED_NTF payload into a tag. Exposed for unit tests.
  * pkt points at the full packet (header + payload). Returns 0 or <0. */

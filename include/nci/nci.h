@@ -97,7 +97,9 @@ typedef enum {
 #define NCI_TECH_V     0x08   /* NFC-V (ISO 15693)                         */
 #define NCI_TECH_ALL   (NCI_TECH_A | NCI_TECH_B | NCI_TECH_F | NCI_TECH_V)
 
-#define NCI_MAX_UID_LEN 10
+#define NCI_MAX_UID_LEN  10
+#define NCI_MAX_ATS_LEN  20   /* ISO-DEP ATS historical bytes we retain           */
+#define NCI_MAX_APP_DATA  4   /* NFC-B ATQB application data (from SENSB_RES)      */
 
 typedef struct {
     nci_protocol protocol;
@@ -108,6 +110,11 @@ typedef struct {
     uint16_t     atqa;                  /* NFC-A SENS_RES (ATQA)            */
     uint8_t      disc_id;               /* RF discovery id (multi-tag)      */
     bool         more;                  /* more tags present in the field   */
+    /* Activation detail retained from the RF_INTF_ACTIVATED_NTF (impl #4). */
+    uint8_t      ats[NCI_MAX_ATS_LEN];  /* ISO-DEP historical bytes (RATS resp)   */
+    uint8_t      ats_len;               /* 0 if none (non-ISO-DEP or no HB)        */
+    uint8_t      app_data[NCI_MAX_APP_DATA]; /* NFC-B ATQB application data        */
+    uint8_t      app_data_len;          /* 0 if none (non-NFC-B)                   */
 } nci_tag;
 
 /* Opaque device handle. */

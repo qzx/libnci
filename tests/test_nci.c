@@ -15,7 +15,8 @@
 #include <string.h>
 
 /* ---- a mock transport: a FIFO of canned response packets -------- */
-#define MAX_RESP 16
+#define MAX_RESP   16
+#define MAX_WRITES 32
 typedef struct {
     const uint8_t *resp[MAX_RESP];
     size_t         resp_len[MAX_RESP];
@@ -24,17 +25,31 @@ typedef struct {
     int            writes;
     uint8_t        last_cmd[260];      /* capture the most recent command   */
     size_t         last_cmd_len;
+    /* full write log (commands AND data packets) for shape assertions       */
+    uint8_t        wr[MAX_WRITES][260];
+    size_t         wr_len[MAX_WRITES];
+    int            n_wr;
+    int            fail_write;         /* when set, mock_write returns -1 (I/O) */
 } mock;
 
 static int mock_write(void *ctx, const uint8_t *buf, size_t len)
 {
     mock *m = ctx;
     assert(len >= 3);
-    assert((buf[0] & 0xE0) == 0x20);   /* must be an NCI command (MT=CMD) */
+    /* Accept an NCI command (MT=CMD, 0x20) or an NCI data packet (MT=Data, 0x00);
+     * TX data chaining and the presence-check probe both write data packets. */
+    uint8_t mtbits = buf[0] & 0xE0;
+    assert(mtbits == 0x20 || mtbits == 0x00);
+    if (m->fail_write) return -1;      /* simulate a transport write fault      */
     m->writes++;
     size_t n = len < sizeof m->last_cmd ? len : sizeof m->last_cmd;
     memcpy(m->last_cmd, buf, n);
     m->last_cmd_len = n;
+    if (m->n_wr < MAX_WRITES) {
+        memcpy(m->wr[m->n_wr], buf, n);
+        m->wr_len[m->n_wr] = n;
+        m->n_wr++;
+    }
     return (int)len;
 }
 
@@ -132,9 +147,11 @@ static void test_parse_nfca(void)
     assert(nci_parse_activation(ACT_NTF, sizeof ACT_NTF, &tag) == NCI_OK);
     assert(tag.uid_len == 7);
     assert(tag.protocol == NCI_PROTO_T2T);
+    assert(tag.disc_id == 0x01);   /* impl #4: single-tag path now sets disc_id */
     printf("  parse_nfca: OK\n");
 }
 
+/* #5: a non-OK status byte propagates as the typed NCI_E_STATUS (not NCI_ERR). */
 static void test_bad_status_fails(void)
 {
     static const uint8_t RESET_RSP_BAD[] = { 0x40, 0x00, 0x01, 0x03 }; /* status!=OK */
@@ -143,8 +160,213 @@ static void test_bad_status_fails(void)
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, RESET_RSP_BAD, sizeof RESET_RSP_BAD);
-    assert(nci_core_reset(&t, NULL) == NCI_ERR);
-    printf("  bad_status_fails: OK\n");
+    assert(nci_core_reset(&t, NULL) == NCI_E_STATUS);
+    printf("  bad_status_fails: OK (NCI_E_STATUS)\n");
+}
+
+/* #5: command() distinguishes timeout vs I/O vs status instead of a flat NCI_ERR. */
+static void test_typed_errors(void)
+{
+    /* (a) NFCC silent -> NCI_E_TIMEOUT (read returns 0). */
+    {
+        mock m = {0};   /* no queued responses */
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        assert(nci_core_reset(&t, NULL) == NCI_E_TIMEOUT);
+    }
+    /* (b) transport write fault -> NCI_E_IO. */
+    {
+        mock m = {0}; m.fail_write = 1;
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        assert(nci_core_reset(&t, NULL) == NCI_E_IO);
+    }
+    printf("  typed_errors: OK (TIMEOUT + IO)\n");
+}
+
+/* #3: capabilities parsed and RETAINED from CORE_INIT_RSP into nci_dev_info. */
+static void test_caps_from_core_init(void)
+{
+    /* NCI 1.0 CORE_INIT_RSP: status, NFCC Features(4), num_rf(1), rf[3](1 each),
+     * max_conn(1), route(2), max_ctrl(1), max_large(2), manuf_id(1), manuf(3). */
+    static const uint8_t INIT_RSP_V1[] = {
+        0x40, 0x01, 0x13,
+        0x00,                   /* status                                   */
+        0xAA, 0xBB, 0xCC, 0xDD, /* NFCC Features (LE -> 0xDDCCBBAA)          */
+        0x03,                   /* number of supported RF interfaces         */
+        0x01, 0x02, 0x03,       /* Frame, ISO-DEP, NFC-DEP (1 byte each)     */
+        0x01,                   /* max logical connections                   */
+        0x00, 0x20,             /* max routing table size                    */
+        0xFF,                   /* max control packet payload                */
+        0x00, 0x01,             /* max size for large params (1.0 only)      */
+        0x04,                   /* manufacturer id                           */
+        0x11, 0x22, 0x33,       /* manufacturer specific info                */
+    };
+    {
+        mock m = {0};
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        mock_push(&m, INIT_RSP_V1, sizeof INIT_RSP_V1);
+        nci_dev_info info = { .nci_version = 0x10 };   /* force the 1.0 parse */
+        assert(nci_core_init(&t, &info) == NCI_OK);
+        assert(info.caps_valid);
+        assert(info.nfcc_features == 0xDDCCBBAAu);
+        assert(info.rf_interfaces ==
+               (NCI_RFI_BIT(0x01) | NCI_RFI_BIT(0x02) | NCI_RFI_BIT(0x03)));
+        assert(info.manuf_id == 0x04);
+        assert(info.fw_info_len == 3);
+        assert(info.max_data_payload == 0);   /* no such field in NCI 1.0    */
+    }
+
+    /* NCI 2.0 CORE_INIT_RSP: status, NFCC Features(4), num_rf(1), then each
+     * interface is type(1)+n_ext(1)+ext(n_ext); after the list come max_conn(1),
+     * route(2), max_ctrl(1), Max Data Packet Payload Size(1). */
+    static const uint8_t INIT_RSP_V2[] = {
+        0x40, 0x01, 0x10,
+        0x00,                   /* status                                   */
+        0x01, 0x02, 0x03, 0x04, /* NFCC Features (LE -> 0x04030201)          */
+        0x02,                   /* number of supported RF interfaces         */
+        0x02, 0x00,             /* ISO-DEP, 0 extensions                     */
+        0x01, 0x01, 0x90,       /* Frame, 1 extension (0x90)                 */
+        0x01,                   /* max logical connections                   */
+        0x00, 0x40,             /* max routing table size                    */
+        0xFF,                   /* max control packet payload                */
+        0x80,                   /* Max Data Packet Payload Size = 128        */
+    };
+    {
+        mock m = {0};
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        mock_push(&m, INIT_RSP_V2, sizeof INIT_RSP_V2);
+        nci_dev_info info = { .nci_version = 0x20 };   /* the 2.0 parse       */
+        assert(nci_core_init(&t, &info) == NCI_OK);
+        assert(info.caps_valid);
+        assert(info.nfcc_features == 0x04030201u);
+        assert(info.rf_interfaces == (NCI_RFI_BIT(0x02) | NCI_RFI_BIT(0x01)));
+        assert(info.max_data_payload == 0x80);
+        assert(info.manuf_id == 0x00);   /* 2.0 manuf rides CORE_RESET_NTF   */
+    }
+    printf("  caps_from_core_init: OK (1.0 ifaces+manuf, 2.0 max-data-payload)\n");
+}
+
+/* #1: a large TX payload is segmented into chained data packets, PBF set on all
+ * but the last, with a send credit consumed per segment. */
+static void test_tx_chaining(void)
+{
+    mock m = {0};
+    nci_transport t = {
+        .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+    };
+    /* One DATA response (payload 90 00, PBF clear) so the call completes. */
+    static const uint8_t RESP_DATA[] = { 0x00, 0x00, 0x02, 0x90, 0x00 };
+    mock_push(&m, RESP_DATA, sizeof RESP_DATA);
+
+    nci_rf_conn conn = {
+        .activated = true, .rf_interface = 0x02, .max_payload = 50, .credits = 5,
+    };
+    uint8_t tx[120];
+    for (size_t i = 0; i < sizeof tx; i++) tx[i] = (uint8_t)i;
+    uint8_t rx[16]; size_t rxn = 0;
+    int r = nci_data_xchg(&t, &conn, tx, sizeof tx, rx, sizeof rx, &rxn, 100);
+    assert(r == 1);
+    assert(rxn == 2 && rx[0] == 0x90 && rx[1] == 0x00);
+
+    /* Three segments: 50, 50, 20. PBF (0x10) set on the first two, clear on the last. */
+    assert(m.n_wr == 3);
+    assert(m.wr[0][0] == 0x10 && m.wr[0][2] == 50);
+    assert(m.wr[1][0] == 0x10 && m.wr[1][2] == 50);
+    assert(m.wr[2][0] == 0x00 && m.wr[2][2] == 20);
+    /* Payload reassembles in order across the segments. */
+    assert(m.wr[0][3] == 0x00 && m.wr[1][3] == 50 && m.wr[2][3] == 100);
+    /* One credit spent per segment. */
+    assert(conn.credits == 2);
+    printf("  tx_chaining: OK (120 B -> 50/50/20, PBF 1/1/0)\n");
+}
+
+/* #4: non-destructive ISO-DEP presence check writes an empty data packet and
+ * reads the reply without a sleep/re-select. */
+static void test_presence_check(void)
+{
+    /* present: the card answers with a data frame. */
+    {
+        mock m = {0};
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        static const uint8_t RESP_DATA[] = { 0x00, 0x00, 0x01, 0xA3 };
+        mock_push(&m, RESP_DATA, sizeof RESP_DATA);
+        nci_rf_conn conn = { .activated = true, .rf_interface = 0x02, .credits = 1 };
+        assert(nci_iso_dep_presence_check(&t, &conn) == 1);
+        assert(conn.activated);                 /* session preserved            */
+        assert(m.n_wr == 1);
+        assert(m.wr[0][0] == 0x00 && m.wr[0][2] == 0x00);   /* empty data packet */
+    }
+    /* gone: the NFCC reports RF_DEACTIVATE_NTF. */
+    {
+        mock m = {0};
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        static const uint8_t DEACT_NTF[] = { 0x61, 0x06, 0x01, 0x00 };
+        mock_push(&m, DEACT_NTF, sizeof DEACT_NTF);
+        nci_rf_conn conn = { .activated = true, .rf_interface = 0x02, .credits = 1 };
+        assert(nci_iso_dep_presence_check(&t, &conn) == 0);
+        assert(!conn.activated);
+    }
+    /* inconclusive: silence -> negative, caller falls back. */
+    {
+        mock m = {0};
+        nci_transport t = {
+            .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
+        };
+        nci_rf_conn conn = { .activated = true, .rf_interface = 0x02, .credits = 1 };
+        assert(nci_iso_dep_presence_check(&t, &conn) < 0);
+    }
+    printf("  presence_check: OK (present/gone/inconclusive)\n");
+}
+
+/* #4: ISO-DEP ATS historical bytes and NFC-B ATQB application data are retained. */
+static void test_activation_detail(void)
+{
+    /* NFC-A ISO-DEP activation whose ATS carries 3 historical bytes C1 02 03. */
+    static const uint8_t ACT_ISODEP_A[] = {
+        0x61, 0x05, 0x18,
+        0x01, 0x02, 0x04, 0x00, 0xFF, 0x01, 0x08,   /* fixed (proto ISO-DEP)  */
+        0x44, 0x03, 0x04, 0x04, 0x11, 0x22, 0x33, 0x20, /* 8 tech params      */
+        0x00, 0x00, 0x00, 0x05,                     /* mode, tx, rx, ap_len=5 */
+        0x05, 0x00, 0xC1, 0x02, 0x03,               /* ATS: TL,T0,H1,H2,H3    */
+    };
+    nci_tag ta;
+    assert(nci_parse_activation(ACT_ISODEP_A, sizeof ACT_ISODEP_A, &ta) == NCI_OK);
+    assert(ta.protocol == NCI_PROTO_ISODEP);
+    assert(ta.disc_id == 0x01);
+    assert(ta.ats_len == 3);
+    static const uint8_t hb[] = { 0xC1, 0x02, 0x03 };
+    assert(memcmp(ta.ats, hb, 3) == 0);
+    assert(ta.app_data_len == 0);
+
+    /* NFC-B (type-4B) activation: SENSB_RES carries 4 application-data bytes. */
+    static const uint8_t ACT_ISODEP_B[] = {
+        0x61, 0x05, 0x13,
+        0x01, 0x02, 0x04, 0x01, 0xFF, 0x01, 0x0C,   /* fixed (tech = NFC-B)   */
+        0x50, 0xA1, 0xA2, 0xA3, 0xA4,               /* 0x50 + NFCID0          */
+        0xB1, 0xB2, 0xB3, 0xB4,                     /* application data       */
+        0xC1, 0xC2, 0xC3,                           /* protocol info          */
+    };
+    nci_tag tb;
+    assert(nci_parse_activation(ACT_ISODEP_B, sizeof ACT_ISODEP_B, &tb) == NCI_OK);
+    assert(tb.tech_mode == 0x01);
+    assert(tb.uid_len == 4);
+    static const uint8_t nfcid0[] = { 0xA1, 0xA2, 0xA3, 0xA4 };
+    assert(memcmp(tb.uid, nfcid0, 4) == 0);
+    assert(tb.app_data_len == 4);
+    static const uint8_t appd[] = { 0xB1, 0xB2, 0xB3, 0xB4 };
+    assert(memcmp(tb.app_data, appd, 4) == 0);
+    printf("  activation_detail: OK (ATS historical + ATQB app data)\n");
 }
 
 /* #1: RF_DISCOVER built from a technology mask emits only the chosen techs. */
@@ -233,6 +455,11 @@ int main(void)
     test_parse_nfca();
     test_bringup_and_uid();
     test_bad_status_fails();
+    test_typed_errors();
+    test_caps_from_core_init();
+    test_tx_chaining();
+    test_presence_check();
+    test_activation_detail();
     test_discover_mask();
     test_poll_multi();
     test_discover_select();
