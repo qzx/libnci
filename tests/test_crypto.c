@@ -74,7 +74,12 @@ static void test_crc32(void)
 {
     /* CRC-32/JAMCRC("123456789") = 0x340BC6D9 (the DESFire variant). */
     assert(crypto_crc32_desfire((const uint8_t *)"123456789", 9) == 0x340BC6D9u);
-    printf("  crc32_desfire (JAMCRC): OK\n");
+    /* Empty input = the init value, no final inversion (JAMCRC, not CRC-32). */
+    assert(crypto_crc32_desfire((const uint8_t *)"", 0) == 0xFFFFFFFFu);
+    /* A single zero byte: 0xFFFFFFFF folded once. Distinguishes JAMCRC (no final
+     * XOR) from standard CRC-32, which would give ~this = 0xD202EF8D. */
+    assert(crypto_crc32_desfire((const uint8_t[]){0x00}, 1) == 0x2DFD1072u);
+    printf("  crc32_desfire (JAMCRC, 3 vectors): OK\n");
 }
 
 static void test_random(void)

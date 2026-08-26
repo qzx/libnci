@@ -209,6 +209,30 @@ test_desfire_aes = executable('test_desfire_aes',
   dependencies: [libcrypto])
 test('desfire_aes', test_desfire_aes)
 
+# DESFire EV2 / NTAG 424 secure messaging: SesAuthENC/MAC (SV1/SV2) + per-command
+# IVc/IVr KATs, a mock-card AuthenticateEV2First cross-checked against an
+# independent reference of the SV/IV math, and MAC-/Full-mode command round-trips
+# with the on-wire CMAC and enciphered payload pinned. Vectors: AN12196
+# worked-example inputs; outputs computed from the documented construction (see
+# the file header). desfire_ev2.c reaches the card via desfire_apdu_raw.
+test_desfire_sm = executable('test_desfire_sm',
+  ['tests/test_desfire_sm.c', 'src/desfire_ev2.c', 'src/desfire.c',
+   'src/crypto.c', 'src/log.c'],
+  include_directories: inc_all,
+  dependencies: [libcrypto])
+test('desfire_sm', test_desfire_sm)
+
+# DESFire legacy/ISO 3DES session-key interleave KATs (2K3DES / 3K3DES / single
+# DES) - the exact spot the Phase-1 3K3DES offset bug lived - plus one full
+# 3K3DES ISO(0x1A) handshake against a mock card (also exercises crypto_3des_cbc
+# EDE3). Pure derivation; the interleave is documented (libfreefare).
+test_legacy_kat = executable('test_legacy_kat',
+  ['tests/test_legacy_kat.c', 'src/desfire_legacy.c', 'src/desfire.c',
+   'src/crypto.c', 'src/log.c'],
+  include_directories: inc_all,
+  dependencies: [libcrypto])
+test('legacy_kat', test_legacy_kat)
+
 # DESFire high-level client flows: only the pure GetFileSettings parser
 # (nci_desfire_parse_file_settings) is unit-tested; the surrounding one-call
 # flows are integration-only. The module's translation unit still references the

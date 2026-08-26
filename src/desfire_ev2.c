@@ -43,9 +43,10 @@ static void truncate_mac(const uint8_t full[16], uint8_t out[8])
     for (int i = 0; i < 8; i++) out[i] = full[2 * i + 1];
 }
 
-/* IVc/IVr = E_ECB(SesENC, label || TI || CmdCtr(LE16) || 0^8). */
-static int build_iv(const desfire_ev2_session *s, uint8_t l0, uint8_t l1,
-                    uint8_t iv[16])
+/* IVc/IVr = E_ECB(SesENC, label || TI || CmdCtr(LE16) || 0^8).
+ * Non-static (prototype in desfire_ev2.h) so the KAT tests can pin it directly. */
+int desfire_ev2_build_iv(const desfire_ev2_session *s, uint8_t l0, uint8_t l1,
+                         uint8_t iv[16])
 {
     uint8_t block[16] = {0};
     block[0] = l0; block[1] = l1;
@@ -56,9 +57,10 @@ static int build_iv(const desfire_ev2_session *s, uint8_t l0, uint8_t l1,
 }
 
 /* SesAuthENC/SesAuthMAC from Kx, RndA, RndB (SP800-108 CMAC; same for First and
- * NonFirst). SV1/SV2 share the 26-byte tail built from the two challenges. */
-static int derive_session_keys(const uint8_t key[16], const uint8_t rnda[16],
-                               const uint8_t rndb[16], desfire_ev2_session *s)
+ * NonFirst). SV1/SV2 share the 26-byte tail built from the two challenges.
+ * Non-static (prototype in desfire_ev2.h) so the KAT tests can pin it directly. */
+int desfire_ev2_derive_session_keys(const uint8_t key[16], const uint8_t rnda[16],
+                                    const uint8_t rndb[16], desfire_ev2_session *s)
 {
     uint8_t tail[26];
     memcpy(tail, rnda, 2);
@@ -127,7 +129,7 @@ int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,
         return NCI_ERR;
     }
 
-    if (derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
+    if (desfire_ev2_derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
 
     memcpy(s->ti, plain, 4);
     s->cmd_ctr = 0;
@@ -182,7 +184,7 @@ int desfire_ev2_authenticate_nonfirst(apdu_fn fn, void *ctx, uint8_t key_no,
         LOGE("ev2: NonFirst proof (RndA') mismatch");
         s->active = false; return NCI_ERR;
     }
-    if (derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
+    if (desfire_ev2_derive_session_keys(key, rnda, rndb, s) != NCI_OK) return NCI_ERR;
 
     memcpy(s->ti, saved_ti, 4);   /* TI and CmdCtr are preserved across NonFirst */
     s->cmd_ctr = saved_ctr;
@@ -216,7 +218,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
         padded[pl++] = 0x80;
         while (pl % 16) padded[pl++] = 0x00;
         uint8_t ivc[16];
-        if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
+        if (desfire_ev2_build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
         if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, padded, pl, enc_data) != 0)
             return NCI_ERR;
         enc_len = pl;
@@ -310,7 +312,7 @@ int desfire_ev2_transact(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     if (rx_enc && enc_resp_len > 0) {
         if (enc_resp_len % 16 != 0) { LOGE("ev2: resp not block-aligned"); return NCI_ERR; }
         uint8_t ivr[16];
-        if (build_iv(s, 0x5A, 0xA5, ivr) != 0) return NCI_ERR;
+        if (desfire_ev2_build_iv(s, 0x5A, 0xA5, ivr) != 0) return NCI_ERR;
         uint8_t dec[1024];
         if (crypto_aes_cbc_decrypt(s->ses_enc, ivr, resp, enc_resp_len, dec) != 0)
             return NCI_ERR;
@@ -664,7 +666,7 @@ int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     /* Encrypt with the command IV (uses the current CmdCtr, matching the
      * command MAC that desfire_ev2_transact will compute). */
     uint8_t ivc[16];
-    if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
+    if (desfire_ev2_build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
     uint8_t enc[48];
     if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, plain, pl, enc) != 0) return NCI_ERR;
 
@@ -705,7 +707,7 @@ int desfire_ev2_change_key_ev2(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     while (pl % 16) plain[pl++] = 0x00;
 
     uint8_t ivc[16];
-    if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
+    if (desfire_ev2_build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
     uint8_t enc[48];
     if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, plain, pl, enc) != 0) return NCI_ERR;
 

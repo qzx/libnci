@@ -38,6 +38,15 @@ typedef struct {
                                 secure read answers 0x911C ILLEGAL_COMMAND otherwise. */
 } desfire_ev2_session;
 
+/* --- internals exposed for the KAT tests (test_desfire_sm.c) -----------
+ * SV1/SV2 CMAC session-key derivation and the per-command IV construction are
+ * the exact pieces a transcription bug (cf. the Phase-1 3K3DES offset error)
+ * would silently corrupt, so pin them directly. Not part of the client API. */
+int desfire_ev2_derive_session_keys(const uint8_t key[16], const uint8_t rnda[16],
+                                    const uint8_t rndb[16], desfire_ev2_session *s);
+int desfire_ev2_build_iv(const desfire_ev2_session *s, uint8_t l0, uint8_t l1,
+                         uint8_t iv[16]);
+
 /* AuthenticateEV2First with an AES-128 key. On success *s holds a live
  * session. The app owning the key must already be selected. */
 int desfire_ev2_authenticate(apdu_fn fn, void *ctx, uint8_t key_no,

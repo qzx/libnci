@@ -32,8 +32,8 @@ static void rotl1(uint8_t *b, size_t n)
  * master key is single DES, so its session key is the DUPLICATED form. Deriving
  * it as 2K3DES (wrong high half) still passes auth (the proof uses the raw
  * all-zero key, identical for DES vs 2K3DES) but makes ChangeKey fail 0x1E. */
-static void derive_session_key(const uint8_t *rnda, const uint8_t *rndb,
-                               size_t rl, size_t key_len, desfire_legacy_session *s)
+void desfire_legacy_derive_session_key(const uint8_t *rnda, const uint8_t *rndb,
+                                       size_t rl, size_t key_len, desfire_legacy_session *s)
 {
     uint8_t *k = s->session_key;
     memcpy(k + 0, rnda + 0, 4);
@@ -93,7 +93,7 @@ int desfire_auth_iso(apdu_fn fn, void *ctx, uint8_t key_no,
     memcpy(exp, rnda, rl); rotl1(exp, rl);
     if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: ISO-auth proof mismatch"); return NCI_ERR; }
 
-    derive_session_key(rnda, rndb, rl, key_len, s);
+    desfire_legacy_derive_session_key(rnda, rndb, rl, key_len, s);
     memset(s->iv, 0, sizeof s->iv);            /* libfreefare zeroes ivect at end of auth() -> IV=0 into the first command */
     s->key_no = key_no;
     s->as_new = 1;                              /* ISO/AES scheme: CRC32 + encrypt-to-send */
@@ -229,7 +229,7 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
     if (crypto_3des_cbc(key, key_len, iv0, resp, rl, rnda_back, 0) != 0) return NCI_ERR;
     if (memcmp(rnda_back, exp, rl) != 0) { LOGE("desfire: legacy-auth proof mismatch"); return NCI_ERR; }
 
-    derive_session_key(rnda, rndb, rl, key_len, s);
+    desfire_legacy_derive_session_key(rnda, rndb, rl, key_len, s);
     memset(s->iv, 0, sizeof s->iv);
     s->key_no = key_no;
     s->as_new = 0;                              /* legacy D40 scheme: CRC16 + decrypt-to-send */

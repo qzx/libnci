@@ -28,6 +28,14 @@ typedef struct {
                                    0 = legacy D40 (0x0A) session -> CRC16 + decrypt-to-send */
 } desfire_legacy_session;
 
+/* Session-key interleave from the two challenges. Exposed (non-static) so the
+ * KAT test (test_legacy_kat.c) pins it directly - it is the exact spot the
+ * Phase-1 3K3DES offset bug lived. rl = challenge length (8 for DES/2K3DES, 16
+ * for 3K3DES); key_len selects the scheme (8=DES, 16=2K3DES, 24=3K3DES). */
+void desfire_legacy_derive_session_key(const uint8_t *rnda, const uint8_t *rndb,
+                                       size_t rl, size_t key_len,
+                                       desfire_legacy_session *s);
+
 /* AuthenticateISO (0x1A): standard (2K/3K)3DES. key_len 16 or 24. */
 int desfire_auth_iso(apdu_fn fn, void *ctx, uint8_t key_no,
                      const uint8_t *key, size_t key_len,
