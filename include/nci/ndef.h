@@ -157,6 +157,107 @@ int ndef_build_wifi_wsc(const char *ssid, const char *psk,
 int ndef_build_handover_select(const uint8_t *carrier_rec, size_t carrier_len,
                               uint8_t cps, uint8_t *out, size_t out_cap);
 
+/* ---- Connection Handover parsing -------------------------------------- *
+ * Decode a received Handover Select (Hs) or Handover Request (Hr) message
+ * from a peer or a static handover tag: the version, the list of Alternative
+ * Carrier records (CPS + carrier data reference + auxiliary data references),
+ * and each referenced carrier configuration record resolved from the same
+ * message. Typed accessors then unpack the common BT/BLE/Wi-Fi carriers.
+ *
+ * All pointers in the parsed structures point into the caller's msg buffer;
+ * msg must outlive the ndef_handover it was parsed into. */
+
+#define NDEF_HANDOVER_MAX_AC  16   /* Alternative Carrier records per message   */
+#define NDEF_HANDOVER_MAX_AUX 4    /* auxiliary data references kept per carrier */
+
+/* A carrier / auxiliary data reference: a byte string naming a record (by its
+ * NDEF ID) elsewhere in the handover message. ref points into msg. */
+typedef struct {
+    const uint8_t *ref;
+    uint8_t        ref_len;
+} ndef_data_ref;
+
+/* One Alternative Carrier ("ac") record plus its resolved carrier record. */
+typedef struct {
+    uint8_t       cps;              /* NDEF_CPS_* (carrier power state)          */
+
+    ndef_data_ref carrier_ref;     /* names the carrier configuration record    */
+    uint8_t       aux_count;       /* auxiliary refs kept in aux[] (<= MAX_AUX)  */
+    uint8_t       aux_declared;    /* total auxiliary refs the record declared   */
+    ndef_data_ref aux[NDEF_HANDOVER_MAX_AUX];
+
+    /* The carrier configuration record resolved by carrier_ref (into msg). */
+    int            resolved;       /* 1 if a matching record was found          */
+    uint8_t        carrier_tnf;
+    const uint8_t *carrier_type;
+    uint8_t        carrier_type_len;
+    const uint8_t *carrier_payload;
+    size_t         carrier_payload_len;
+} ndef_ac_carrier;
+
+typedef struct {
+    int             is_request;    /* 0 = Handover Select, 1 = Handover Request  */
+    uint8_t         version;       /* e.g. 0x15 for spec version 1.5             */
+    int             have_collision_res;
+    uint16_t        collision_res; /* Hr collision-resolution random number      */
+    size_t          ac_count;
+    ndef_ac_carrier ac[NDEF_HANDOVER_MAX_AC];
+} ndef_handover;
+
+/* Parse a Handover Select / Handover Request message. Returns 0 on success,
+ * <0 on malformed input. */
+int ndef_parse_handover(const uint8_t *msg, size_t len, ndef_handover *out);
+
+/* Bluetooth BR/EDR OOB (application/vnd.bluetooth.ep.oob). bdaddr is stored
+ * MSB first (printed order). Optional fields carry a have_* flag. */
+typedef struct {
+    uint8_t bdaddr[6];
+    int     have_name;
+    char    name[255];             /* Complete/Shortened Local Name, NUL-term    */
+    int     have_cod;
+    uint8_t cod[3];                /* Class of Device (little-endian, on-wire)   */
+    int     have_hash_c;
+    uint8_t hash_c[16];            /* Simple Pairing Hash C-192                   */
+    int     have_rand_r;
+    uint8_t rand_r[16];            /* Simple Pairing Randomizer R-192            */
+} ndef_bt_oob;
+
+/* Bluetooth LE OOB (application/vnd.bluetooth.le.oob). bdaddr MSB first. */
+typedef struct {
+    int      have_addr;
+    uint8_t  bdaddr[6];
+    uint8_t  addr_type;            /* 0 public, 1 random                         */
+    int      have_role;
+    uint8_t  role;                 /* LE Role value                              */
+    int      have_name;
+    char     name[255];
+    int      have_appearance;
+    uint16_t appearance;
+    int      have_sc_confirm;
+    uint8_t  sc_confirm[16];       /* LE Secure Connections Confirmation Value   */
+    int      have_sc_random;
+    uint8_t  sc_random[16];        /* LE Secure Connections Random Value         */
+} ndef_ble_oob;
+
+/* Wi-Fi Simple Config credential (application/vnd.wfa.wsc). */
+typedef struct {
+    char     ssid[33];             /* up to 32 octets + NUL                      */
+    uint8_t  ssid_len;
+    uint16_t auth_type;            /* WSC Authentication Type (e.g. 0x0020 WPA2) */
+    uint16_t encr_type;            /* WSC Encryption Type (e.g. 0x0008 AES)      */
+    uint8_t  network_key[65];      /* up to 64 octets + NUL                      */
+    uint8_t  network_key_len;
+    int      have_mac;
+    uint8_t  mac[6];
+} ndef_wifi_cred;
+
+/* Unpack the i-th Alternative Carrier as a typed carrier. Each returns 0 on
+ * success, <0 if i is out of range, the carrier is unresolved, or its MIME
+ * type does not match the requested carrier kind. */
+int ndef_handover_get_bt(const ndef_handover *h, size_t i, ndef_bt_oob *out);
+int ndef_handover_get_ble(const ndef_handover *h, size_t i, ndef_ble_oob *out);
+int ndef_handover_get_wifi(const ndef_handover *h, size_t i, ndef_wifi_cred *out);
+
 #ifdef __cplusplus
 }
 #endif

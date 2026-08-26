@@ -27,10 +27,12 @@ inc_public = include_directories('include')
 nci_sources = [
   'src/nci.c', 'src/device.c', 'src/ce.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
+  'src/ndef_handover.c',
   'src/t2t.c', 'src/t5t.c', 'src/t3t.c', 'src/t1t.c',
   'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/desfire_lrp.c', 'src/desfire_dam.c', 'src/desfire_hl.c', 'src/desfire_provision.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
+  'src/originality.c', 'src/kdf.c',
 ]
 nci_deps  = [libcrypto, libthreads]
 nci_cargs = []
@@ -228,3 +230,35 @@ test_provision = executable('test_provision',
   link_with: nci_lib,
   dependencies: nci_deps)
 test('provision', test_provision)
+
+# Fleet-provisioning key derivation (nci/kdf.h): HMAC-SHA256 vs RFC 4231,
+# AN10922 AES-128/2K3DES/3K3DES diversification, UID-bound node key. Pure math
+# over crypto.c's AES-CMAC + OpenSSL EVP_MAC (HMAC/TDEA-CMAC), so a small source
+# subset suffices - no device closure.
+test_kdf = executable('test_kdf',
+  ['tests/test_kdf.c', 'src/kdf.c', 'src/crypto.c', 'src/log.c'],
+  include_directories: inc_all,
+  dependencies: [libcrypto])
+test('kdf', test_kdf)
+
+# Connection Handover parsing (ndef_handover.c) round-tripped against the
+# existing Hs/BT/BLE/Wi-Fi encoders plus hand-built multi-carrier / Hr messages.
+# Pure NDEF, no crypto.
+test_handover = executable('test_handover',
+  ['tests/test_handover.c', 'src/ndef.c', 'src/ndef_build.c',
+   'src/ndef_handover.c', 'src/log.c'],
+  include_directories: inc_all)
+test('handover', test_handover)
+
+# NXP originality signature verification (originality.c): ECDSA-NONE over the UID
+# vs the embedded NXP public keys. The pure verifier is exercised with test-time
+# keypairs, but the convenience readers (nci_desfire_read_signature / the T2T
+# reader) reference the device-layer transceive closure, so link the built
+# library rather than a source subset. The test drives OpenSSL directly (EC
+# keygen/sign), covered by nci_deps' libcrypto.
+test_originality = executable('test_originality',
+  ['tests/test_originality.c'],
+  include_directories: inc_all,
+  link_with: nci_lib,
+  dependencies: nci_deps)
+test('originality', test_originality)
