@@ -21,7 +21,7 @@ mkdir -p "$LIB/src/nci" "$LIB/src/chips" "$LIB/examples"
 # Portable libnci sources (exclude the Linux-only HAL/crypto - replaced below).
 for f in "$ROOT"/src/*.c "$ROOT"/src/*.h; do
   b="$(basename "$f")"
-  case "$b" in i2c.c|gpio.c|crypto.c) continue ;; esac
+  case "$b" in i2c.c|gpio.c|crypto.c|spi.c|kdf.c|originality.c) continue ;; esac
   cp "$f" "$LIB/src/$b"
 done
 cp "$ROOT"/src/chips/*.c          "$LIB/src/chips/"
