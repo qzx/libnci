@@ -152,6 +152,13 @@ typedef struct {
     uint8_t  sel;             /* selected file: 0 none, 1 CC, 2 NDEF        */
     uint8_t  max_payload;     /* NCI data payload limit from the activation */
     int      credits;         /* Conn-0 flow-control credits                */
+    /* Writable-emulation binding (nci_ce_begin_writable). The read-only begin
+     * leaves these zero; buf==NULL then marks the session read-only. */
+    uint8_t        *buf;      /* writable NDEF buffer (NULL => read-only)   */
+    size_t          cap;      /* capacity of buf                            */
+    bool            read_only;/* writable-session read-only flag            */
+    nci_ce_write_cb on_write; /* fired when a reader commits a new NLEN     */
+    void           *user;     /* opaque passed to on_write                  */
 } nci_ce_state;
 
 /* Configure NFC-A listen + ISO-DEP routing to the host and start listen-mode

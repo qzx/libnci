@@ -19,7 +19,6 @@
 
 #include <stdbool.h>
 #include "apdu.h"
-#include "nci/nci.h"   /* NCI_OK / NCI_ERR */
 
 typedef struct {
     bool     active;

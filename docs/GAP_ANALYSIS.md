@@ -416,3 +416,27 @@ The consumer model is **libnci → qzxlib → everything (bridge firmware, Andro
 - The triplicated client flows (read‑file, value‑op, provisioning, reacquire, bootstrap, auth fallback) exist as libnci calls, so qzxlib drops to byte‑pipe transports + `qzx_card_t` + QZX packing (~1,200‑1,500 lines) and **no downstream repo includes libnci internal headers**.
 - The advertised surface tells the truth: SPI is implemented or `NCI_BUS_SPI` returns `NCI_E_NOTSUP`; the FW‑update capability bit reflects a real download path or is dropped.
 - Secure‑messaging, LRP, legacy auth, T2T, and SUN provisioning are covered by KAT/vector tests, not just the pure‑logic layers.
+
+---
+
+## Implementation status (v0.1)
+
+This gap analysis has been **substantially addressed** on branch
+`feat/close-the-gap` (phases 1–7). All five NFC Forum tag types now have a
+command layer and NDEF support (including the user-named NTAG 213/215/216); the
+raw-Frame primitive (`nci_transceive_raw`), turnkey NTAG 424 SUN provisioning,
+one-call DESFire client flows, legacy-AES (`0xAA`) sessions, originality
+verification, AN10922 diversification, HCE (read-only + writable), LLCP/SNEP
+codecs, the PN7150 second chipset, and the named correctness fixes (`0xBD`
+read-INS, SDMAccessRights nibble order, 3K3DES KDF, buffer-overflow hard-error)
+have landed.
+
+- **What can I do with it now:** see `CAPABILITIES.md` (capability matrix + API
+  index by header).
+- **Per-area summary of the work:** see `../CHANGELOG.md` (`## v0.1.0`).
+
+**Live-card verification is pending a bench.** This release was built and tested
+headless (`-Dhardware=false`); the pure protocol/crypto layers are unit-tested,
+but every path that drives a real NFCC or physical card is **bench-unverified**.
+The Linux-only transport/SPI/chipset/firmware paths were likewise not exercised.
+The analysis text above is preserved as the original audit and is not rewritten.

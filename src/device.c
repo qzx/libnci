@@ -10,7 +10,6 @@
  */
 #define _POSIX_C_SOURCE 200809L   /* nanosleep (must precede includes) */
 #include "nci/nci.h"
-#include "nci/nci.h"
 #include "chipset.h"
 #include "transport.h"
 #include "gpio.h"

@@ -1,5 +1,5 @@
 project('nci', 'c',
-  version: '1.0.0-alpha.1',
+  version: '0.1.0',
   license: 'Apache-2.0',
   default_options: ['c_std=c11', 'warning_level=3', 'werror=false',
                     'default_library=both'])
@@ -49,12 +49,12 @@ endif
 
 # A proper versioned library (impl.txt #138). default_library=both builds the
 # shared .so (with an soname) and the static .a; the soname carries soversion 0
-# to signal the alpha's ABI is not yet stable. `library()` lets downstreams link
+# to signal the pre-1.0 ABI is not yet stable. `library()` lets downstreams link
 # either form; apps below link against whichever is the default.
 nci_lib = library('nci',
   nci_sources,
   version: version_numeric,   # full .so.X.Y.Z symlink
-  soversion: '0',             # SONAME: libnci.so.0 (unstable ABI during alpha)
+  soversion: '0',             # SONAME: libnci.so.0 (unstable ABI while 0.x)
   include_directories: inc_all,
   c_args: nci_cargs,
   dependencies: nci_deps,
@@ -63,10 +63,6 @@ nci_lib = library('nci',
 nci_dep = declare_dependency(
   include_directories: inc_public,
   link_with: nci_lib)
-
-# Back-compat aliases for downstreams that referenced the old names.
-hcinfc_dep = nci_dep
-pn7160_dep = nci_dep
 
 # --- demo / CLI apps -------------------------------------------------------
 # These open a local NFCC (nci_open), so they only make sense in a hardware build.

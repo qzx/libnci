@@ -192,32 +192,20 @@ size_t nci_ce_t4t_apdu(nci_ce_t4t *e, const uint8_t *c, size_t n,
  * 2. Session wrapper over nci_transport.
  * ===================================================================== */
 
-/* File-scope binding of the caller's writable buffer + on-write sink for the
- * active emulation session. The single NFCC drives a single listen session, so
- * one binding is sufficient; nci_ce_state (per device) still owns the live
- * session bookkeeping (active/sel/credits/ndef). Cleared by the read-only path
- * and by nci_ce_end so a subsequent read-only session cannot inherit a stale
- * callback. */
-static struct {
-    uint8_t        *buf;
-    size_t          cap;
-    bool            read_only;
-    nci_ce_write_cb on_write;
-    void           *user;
-} g_bind;
-
-/* Build a responder view from the live session state + the writable binding. */
+/* Build a responder view from the live per-device session state. The writable
+ * binding (buf/cap/read_only/on_write/user) lives in nci_ce_state; a read-only
+ * session leaves buf==NULL and the responder view is forced read-only. */
 static void ce_responder(nci_ce_state *ce, nci_ce_t4t *e)
 {
     memset(e, 0, sizeof *e);
     /* Read-only sessions never write, so casting away const on ce->ndef is safe;
-     * writable sessions use the g_bind buffer, which is non-const to begin with. */
-    e->ndef      = g_bind.buf ? g_bind.buf : (uint8_t *)ce->ndef;
-    e->cap       = g_bind.buf ? g_bind.cap : ce->ndef_len;
+     * writable sessions use ce->buf, which is non-const to begin with. */
+    e->ndef      = ce->buf ? ce->buf : (uint8_t *)ce->ndef;
+    e->cap       = ce->buf ? ce->cap : ce->ndef_len;
     e->len       = ce->ndef_len;
-    e->read_only = g_bind.buf ? g_bind.read_only : true;
-    e->on_write  = g_bind.on_write;
-    e->user      = g_bind.user;
+    e->read_only = ce->buf ? ce->read_only : true;
+    e->on_write  = ce->on_write;
+    e->user      = ce->user;
     e->sel       = ce->sel;
     memcpy(e->cc, ce->cc, sizeof e->cc);
 }
@@ -250,7 +238,7 @@ static int ce_discover(nci_transport *t)
 
 /* Arm NFC-A listen + ISO-DEP routing and start listen discovery. Shared by the
  * read-only and writable entry points. The caller has already built ce->cc and
- * set ce->ndef/ce->ndef_len and the g_bind writable binding. */
+ * set ce->ndef/ce->ndef_len and (for a writable session) the ce->buf binding. */
 static int ce_arm(nci_transport *t, nci_ce_state *ce)
 {
     uint8_t rsp[MAX_PKT];
@@ -307,8 +295,7 @@ int nci_ce_begin(nci_transport *t, nci_ce_state *ce,
         return NCI_E_INVAL;
     }
 
-    memset(ce, 0, sizeof *ce);
-    memset(&g_bind, 0, sizeof g_bind);            /* read-only: no writable bind */
+    memset(ce, 0, sizeof *ce);                    /* read-only: no writable bind */
     ce->ndef = ndef;
     ce->ndef_len = ndef_len;
     /* NDEF file = 2-byte NLEN + message; CC advertises the file size, read-only. */
@@ -328,11 +315,11 @@ int nci_ce_begin_writable(nci_transport *t, nci_ce_state *ce,
     if (init_len > cap)       return NCI_E_INVAL;
 
     memset(ce, 0, sizeof *ce);
-    g_bind.buf       = ndef_buf;
-    g_bind.cap       = cap;
-    g_bind.read_only = false;
-    g_bind.on_write  = on_write;
-    g_bind.user      = user;
+    ce->buf       = ndef_buf;
+    ce->cap       = cap;
+    ce->read_only = false;
+    ce->on_write  = on_write;
+    ce->user      = user;
     ce->ndef = ndef_buf;
     ce->ndef_len = init_len;
     /* CC advertises the full writable file (NLEN + cap message bytes). */
@@ -470,7 +457,11 @@ int nci_ce_end(nci_transport *t, nci_ce_state *ce)
     ce->ndef = NULL;
     ce->ndef_len = 0;
     ce->sel = 0;
-    memset(&g_bind, 0, sizeof g_bind);
+    ce->buf = NULL;                 /* drop the writable binding + on-write sink */
+    ce->cap = 0;
+    ce->read_only = false;
+    ce->on_write = NULL;
+    ce->user = NULL;
 
     /* Restore the pre-emulation RF state: leave listen mode and put back the
      * standard poll discover map that ce_arm() replaced with the listen map,
