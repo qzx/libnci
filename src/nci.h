@@ -165,6 +165,12 @@ int nci_ce_begin(nci_transport *t, nci_ce_state *ce,
  * Returns 1 if anything happened, 0 on idle timeout, <0 on error. */
 int nci_ce_pump(nci_transport *t, nci_ce_state *ce, int timeout_ms);
 
+/* Writable variant: emulate a Type-4 tag backed by a caller-owned NDEF buffer;
+ * honor UPDATE BINARY and fire on_write when the phone commits a new message. */
+int nci_ce_begin_writable(nci_transport *t, nci_ce_state *ce,
+                          uint8_t *ndef_buf, size_t cap, size_t init_len,
+                          nci_ce_write_cb on_write, void *user);
+
 /* Leave listen mode (deactivate to idle). */
 int nci_ce_end(nci_transport *t, nci_ce_state *ce);
 

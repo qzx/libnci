@@ -29,6 +29,8 @@ nci_sources = [
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
   'src/ndef_handover.c',
   'src/t2t.c', 'src/t5t.c', 'src/t3t.c', 'src/t1t.c',
+  'src/llcp.c', 'src/snep.c',   # P2P: LLCP + SNEP over an activated NFC-DEP link
+
   'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/desfire_lrp.c', 'src/desfire_dam.c', 'src/desfire_hl.c', 'src/desfire_provision.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
@@ -262,3 +264,22 @@ test_originality = executable('test_originality',
   link_with: nci_lib,
   dependencies: nci_deps)
 test('originality', test_originality)
+
+# Card emulation (listen-mode Type-4 NDEF tag): the pure C-APDU -> R-APDU
+# responder plus the session pump (PBF C-APDU reassembly, Conn-0 flow-control
+# credits, TX data chaining) driven against a mock transport. ce.c's session
+# layer reaches nci_rf_deactivate_idle / nci_rf_discover_map in nci.c and
+# t4t_build_cc in t4t.c, so link those; no libcrypto.
+test_ce = executable('test_ce',
+  ['tests/test_ce.c', 'src/ce.c', 'src/nci.c', 'src/t4t.c', 'src/log.c'],
+  include_directories: inc_all)
+test('ce', test_ce)
+
+# P2P: the pure LLCP + SNEP codecs, the LLCP data-link state machine, and the
+# nci_snep_put/get_link clients driven against a scripted in-memory SNEP peer.
+# Pure protocol logic - no NFCC, no libcrypto; the nci-handle façade's two
+# device.c symbols are stubbed in the test.
+test_p2p = executable('test_p2p',
+  ['tests/test_p2p.c', 'src/llcp.c', 'src/snep.c', 'src/log.c'],
+  include_directories: inc_all)
+test('p2p', test_p2p)

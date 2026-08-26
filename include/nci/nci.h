@@ -274,20 +274,70 @@ int nci_rf_interface_of(nci *d);
 int nci_abort(nci *d);
 
 /* ---- card emulation (listen mode) -------------------------------------- *
- * Present the controller as an NFC Forum Type-4 Tag serving one read-only
- * NDEF message (e.g. a URI built with ndef_build_uri). Listen mode is
- * PASSIVE — the phone's field powers the exchange; we emit no field.
+ * Present the controller as an NFC Forum Type-4 Tag serving an NDEF message
+ * (e.g. a URI built with ndef_build_uri). Listen mode is PASSIVE — the
+ * phone's field powers the exchange; we emit no field.
  *
  * nci_ce_start arms listening (stops any polling first). The caller owns
  * ndef_msg and must keep it alive until nci_ce_stop. Pump nci_ce_service
  * from the main loop with a short timeout; it handles reader activation,
  * serves the T4T APDUs, and re-arms after the reader leaves. Returns 1 when
- * something happened, 0 on idle, <0 on error. */
+ * something happened, 0 on idle, <0 on error. nci_ce_stop leaves listen mode
+ * for idle and restores the poll RF discover-map that arming replaced, so a
+ * subsequent nci_start_discovery polls exactly as it did before emulation. */
 int  nci_ce_start(nci *d, const uint8_t *ndef_msg, size_t ndef_len);
 int  nci_ce_service(nci *d, int timeout_ms);
 int  nci_ce_stop(nci *d);
 /* True while a reader (phone) is actively coupled to the emulated tag. */
 bool nci_ce_reader_present(nci *d);
+
+/* ---- writable card emulation (general HCE, impl.txt / GAP "General HCE") *
+ * Emulate a *writable* Type-4 NDEF tag: the reader may rewrite the message
+ * with ISO 7816-4 UPDATE BINARY (0xD6). ndef_buf is a caller-owned buffer of
+ * `cap` bytes holding the current NDEF message (init_len bytes valid); the
+ * emulated tag advertises a writable CC and serves READ/UPDATE BINARY over it.
+ * When a reader commits a new message (writes the NLEN), on_write fires with a
+ * pointer to ndef_buf and the new length (may be 0). The callback runs on the
+ * pump (nci_ce_service) thread; it must not block. cap+2 (the NLEN prefix plus
+ * the message) must fit a 16-bit file size: cap > 65533 yields NCI_E_INVAL.
+ * Passing on_write = NULL with a read-only intent is equivalent to nci_ce_start
+ * over the same bytes. */
+typedef void (*nci_ce_write_cb)(const uint8_t *ndef, size_t len, void *user);
+int  nci_ce_start_writable(nci *d, uint8_t *ndef_buf, size_t cap, size_t init_len,
+                           nci_ce_write_cb on_write, void *user);
+
+/* ---- Type-4 emulation responder (the pure C-APDU -> R-APDU engine) ------ *
+ * The self-contained ISO 7816-4 state machine that backs nci_ce_start*: no
+ * NFCC, no transport, no allocation. It is exposed so an embedder can drive a
+ * custom HCE loop (or a reader/host bridge) directly, and so it can be unit-
+ * tested against scripted APDUs. Feed whole C-APDUs to nci_ce_t4t_apdu(); it
+ * returns the R-APDU length (>=2, always ending in a 2-byte status word).
+ *
+ * The emulated tag exposes: SELECT by AID (D2760000850101), SELECT EF (CC
+ * 0xE103 / NDEF 0xE104), READ BINARY over either file, and — when not
+ * read_only — UPDATE BINARY into the NDEF file (NLEN prefix + message). */
+typedef struct {
+    uint8_t        *ndef;       /* caller-owned NDEF message buffer            */
+    size_t          cap;        /* capacity of ndef in bytes (max message)    */
+    size_t          len;        /* current NDEF message length (NLEN)         */
+    bool            read_only;  /* reject UPDATE BINARY, advertise RO in CC   */
+    nci_ce_write_cb on_write;   /* fired when a reader commits a new NLEN     */
+    void           *user;       /* opaque cookie for on_write                 */
+    uint8_t         cc[15];     /* Capability Container (filled by init)      */
+    uint8_t         sel;        /* selected file: 0 none, 1 CC, 2 NDEF        */
+} nci_ce_t4t;
+
+/* Initialise a responder over ndef_buf (cap bytes, init_len valid). Builds the
+ * CC (writable unless read_only) and selects nothing. Returns NCI_OK, or
+ * NCI_E_INVAL if cap > 65533 (file size would overflow 16 bits) or init_len >
+ * cap. Safe to re-init to reset the selection/state. */
+int    nci_ce_t4t_init(nci_ce_t4t *e, uint8_t *ndef_buf, size_t cap, size_t init_len,
+                       bool read_only, nci_ce_write_cb on_write, void *user);
+
+/* Handle one C-APDU (clen bytes) and write the R-APDU into r_apdu (r_cap >=
+ * the largest READ BINARY response + 2). Returns the R-APDU length. */
+size_t nci_ce_t4t_apdu(nci_ce_t4t *e, const uint8_t *c_apdu, size_t clen,
+                       uint8_t *r_apdu, size_t r_cap);
 
 /* ---- asynchronous (callback) discovery (impl.txt #9) ------------------ *
  * An alternative to the blocking nci_poll loop: a background thread polls and

@@ -328,6 +328,13 @@ int nci_ce_start(nci *d, const uint8_t *ndef_msg, size_t ndef_len)
     return nci_ce_begin(d->t, &d->ce, ndef_msg, ndef_len);
 }
 
+int nci_ce_start_writable(nci *d, uint8_t *ndef_buf, size_t cap, size_t init_len,
+                          nci_ce_write_cb on_write, void *user)
+{
+    if (!d || !d->t || !ndef_buf) return NCI_E_INVAL;
+    return nci_ce_begin_writable(d->t, &d->ce, ndef_buf, cap, init_len, on_write, user);
+}
+
 int nci_ce_service(nci *d, int timeout_ms)
 {
     if (!d || !d->t) return NCI_E_INVAL;
