@@ -27,6 +27,7 @@ inc_public = include_directories('include')
 nci_sources = [
   'src/nci.c', 'src/device.c', 'src/ce.c',
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
+  'src/t2t.c', 'src/t5t.c', 'src/t3t.c', 'src/t1t.c',
   'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
   'src/desfire_lrp.c', 'src/desfire_dam.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
@@ -162,6 +163,29 @@ test_ndef = executable('test_ndef',
   ['tests/test_ndef.c', 'src/ndef.c', 'src/ndef_build.c', 'src/log.c'],
   include_directories: inc_all)
 test('ndef', test_ndef)
+
+# Tag-type command cores vs RAM-backed fake tags (no NFCC, no libcrypto).
+# t2t/t5t/t1t use the inline LOG macros so they link src/log.c; t3t supplies its
+# own nci_log_get_level stub, so linking src/log.c there would duplicate it.
+test_t2t = executable('test_t2t',
+  ['tests/test_t2t.c', 'src/t2t.c', 'src/log.c'],
+  include_directories: inc_all)
+test('t2t', test_t2t)
+
+test_t5t = executable('test_t5t',
+  ['tests/test_t5t.c', 'src/t5t.c', 'src/log.c'],
+  include_directories: inc_all)
+test('t5t', test_t5t)
+
+test_t3t = executable('test_t3t',
+  ['tests/test_t3t.c', 'src/t3t.c'],
+  include_directories: inc_all)
+test('t3t', test_t3t)
+
+test_t1t = executable('test_t1t',
+  ['tests/test_t1t.c', 'src/t1t.c', 'src/log.c'],
+  include_directories: inc_all)
+test('t1t', test_t1t)
 
 # NTAG 424 DNA SDM / SUN verifier (AN12196 primitives)
 test_sdm = executable('test_sdm',

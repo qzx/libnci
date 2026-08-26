@@ -20,6 +20,10 @@
 #include "mifare.h"
 #include "mfc_ndef.h"
 #include "nci/mifare.h"
+#include "nci/t2t.h"
+#include "nci/t5t.h"
+#include "nci/t3t.h"
+#include "nci/t1t.h"
 #include "desfire.h"
 #include "desfire_ev2.h"
 #include "desfire_ev3.h"
@@ -757,42 +761,228 @@ static int facade_apdu(void *vp, const uint8_t *tx, size_t tx_len,
     return 0;
 }
 
+/* ---- universal NDEF: dispatch on the activated tag's protocol --------- *
+ * nci_read_ndef and the four nci_ndef_* entry points were originally Type 4
+ * only. They now route to the matching tag-type module by the RF protocol the
+ * NFCC activated (d->conn.rf_protocol):
+ *   ISO-DEP -> T4T (ISO 7816 over the apdu seam)   MIFARE Classic -> nci_mfc_*
+ *   T2T -> nci_t2t_ndef_*   T5T -> nci_t5t_ndef_*   T1T -> nci_t1t_ndef_*
+ *   T3T -> nci_t3t_ndef_* (FeliCa commands are IDm-addressed, so the IDm is
+ *          fetched with a Polling frame first).
+ * A MIFARE Classic that a PN7160 reports as T2T is caught by mfc_tag() before
+ * the protocol switch. Non-T4T NDEF uses the library's default MAD/NDEF keys.
+ * A type whose module lacks the requested capability returns NCI_E_NOTSUP. */
+
+static bool mfc_tag(nci *d);   /* defined below (MIFARE detection incl. SAK) */
+
+/* The RF protocol the NFCC activated, or NCI_PROTO_UNKNOWN if no live tag. */
+static nci_protocol active_proto(nci *d)
+{
+    return (d && d->conn.activated) ? (nci_protocol)d->conn.rf_protocol
+                                    : NCI_PROTO_UNKNOWN;
+}
+
+/* Fetch the active FeliCa card's 8-byte IDm (NFCID2) so the IDm-addressed T3T
+ * NDEF commands can target it. A wildcard Polling answers for the lone tag. */
+static int t3t_idm(nci *d, uint8_t idm[8])
+{
+    return nci_t3t_polling(d, NCI_T3T_SYSCODE_WILDCARD, idm, NULL);
+}
+
+/* Length of the first NDEF TLV (tag 0x03) in an NFC-Forum TLV stream, skipping
+ * NULL/lock/memory TLVs; 0 if none is found within n bytes. Shared by the
+ * T2T/T5T/T1T check paths (all three use the same TLV framing). */
+static size_t nfc_tlv_ndef_len(const uint8_t *tlv, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        uint8_t t = tlv[i++];
+        if (t == 0x00) continue;           /* NULL TLV: single byte       */
+        if (t == 0xFE) break;               /* terminator TLV              */
+        if (i >= n) break;
+        size_t len = tlv[i++];
+        if (len == 0xFF) {                  /* 3-byte length form          */
+            if (i + 2 > n) break;
+            len = ((size_t)tlv[i] << 8) | tlv[i + 1];
+            i += 2;
+        }
+        if (t == 0x03) return len;          /* NDEF TLV                    */
+        i += len;                           /* skip lock/memory/other      */
+    }
+    return 0;
+}
+
+/* nci_ndef_check for the non-T4T types: fill *out from the tag's Capability
+ * Container / Attribute block. is_ndef requires the NDEF magic; a valid CC
+ * with no NDEF TLV yields is_ndef=true, ndef_length=0. */
+static int t2t_ndef_check(nci *d, nci_ndef_info *out)
+{
+    uint8_t cc[16];                          /* one READ returns pages 3..6 */
+    int r = nci_t2t_read_page(d, 3, cc);
+    if (r != NCI_OK) return r;
+    if (cc[0] != 0xE1) return NCI_OK;        /* not NDEF-formatted          */
+    out->is_ndef     = true;
+    out->max_length  = (uint16_t)(cc[2] * 8);
+    out->writable    = ((cc[3] & 0x0F) == 0x00);
+    out->ndef_length = (uint16_t)nfc_tlv_ndef_len(cc + 4, sizeof cc - 4);
+    return NCI_OK;
+}
+
+static int t5t_ndef_check(nci *d, nci_ndef_info *out)
+{
+    uint8_t cc[8]; size_t bs = 0;
+    int r = nci_t5t_read_block(d, 0, cc, sizeof cc, &bs);
+    if (r != NCI_OK) return r;
+    if (bs < 4 || cc[0] != 0xE1) return NCI_OK;
+    out->is_ndef    = true;
+    out->max_length = (uint16_t)(cc[2] * 8);        /* MLEN = size / 8      */
+    out->writable   = ((cc[1] & 0x03) == 0x00);     /* write-access bits    */
+    uint8_t b1[8]; size_t n1 = 0;
+    if (nci_t5t_read_block(d, 1, b1, sizeof b1, &n1) == NCI_OK)
+        out->ndef_length = (uint16_t)nfc_tlv_ndef_len(b1, n1);
+    return NCI_OK;
+}
+
+static int t3t_ndef_check(nci *d, nci_ndef_info *out)
+{
+    uint8_t idm[8];
+    int r = t3t_idm(d, idm);
+    if (r != NCI_OK) return r;
+    uint16_t blk0 = 0;
+    uint8_t attr[16]; size_t al = 0;
+    r = nci_t3t_check(d, idm, NCI_T3T_SERVICE_NDEF_READ, &blk0, 1,
+                      attr, sizeof attr, &al);
+    if (r != NCI_OK) return r;
+    nci_t3t_attr a;
+    if (nci_t3t_attr_parse(attr, &a) != NCI_OK) return NCI_OK;   /* bad CRC */
+    out->is_ndef     = true;
+    out->writable    = (a.rw_flag == 0x01);
+    out->ndef_length = (uint16_t)a.ln;
+    out->max_length  = (uint16_t)(a.nmaxb * NCI_T3T_BLOCK_SIZE);
+    return NCI_OK;
+}
+
+static int t1t_ndef_check(nci *d, nci_ndef_info *out)
+{
+    uint8_t mem[NCI_T1T_STATIC_SIZE]; size_t n = 0;
+    int r = nci_t1t_read_all(d, mem, sizeof mem, &n);
+    if (r != NCI_OK) return r;
+    if (n < 16 || mem[8] != 0xE1) return NCI_OK;    /* CC is bytes 8..11    */
+    out->is_ndef     = true;
+    out->max_length  = (uint16_t)(mem[10] * 8);
+    out->writable    = ((mem[11] & 0x0F) == 0x00);
+    out->ndef_length = (uint16_t)nfc_tlv_ndef_len(mem + 12, n - 12);
+    return NCI_OK;
+}
+
 int nci_read_ndef(nci *d, uint8_t *out, size_t out_cap, size_t *out_len)
 {
     if (!d) return NCI_E_INVAL;
-    if (!nci_tag_supports_apdu(d)) {
-        LOGE("read_ndef: no ISO-DEP tag activated");
+    if (mfc_tag(d))
+        return nci_mfc_ndef_read(d, nci_mfc_key_mad, nci_mfc_key_ndef,
+                                 out, out_cap, out_len);
+    switch (active_proto(d)) {
+    case NCI_PROTO_ISODEP:
+        if (!nci_tag_supports_apdu(d)) {
+            LOGE("read_ndef: no ISO-DEP tag activated");
+            return NCI_E_NO_TAG;
+        }
+        return t4t_read_ndef(facade_apdu, d, out, out_cap, out_len);
+    case NCI_PROTO_T2T: return nci_t2t_ndef_read(d, out, out_cap, out_len);
+    case NCI_PROTO_T5T: return nci_t5t_ndef_read(d, out, out_cap, out_len);
+    case NCI_PROTO_T1T: return nci_t1t_ndef_read(d, out, out_cap, out_len);
+    case NCI_PROTO_T3T: {
+        uint8_t idm[8];
+        int r = t3t_idm(d, idm);
+        if (r != NCI_OK) return r;
+        return nci_t3t_ndef_read(d, idm, out, out_cap, out_len);
+    }
+    default:
+        LOGE("read_ndef: no NDEF-capable tag activated");
         return NCI_E_NO_TAG;
     }
-    return t4t_read_ndef(facade_apdu, d, out, out_cap, out_len);
 }
 
 int nci_ndef_check(nci *d, nci_ndef_info *out)
 {
     if (!d || !out) return NCI_E_INVAL;
-    if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
-    return t4t_check(facade_apdu, d, out) == NCI_OK ? NCI_OK : NCI_ERR;
+    memset(out, 0, sizeof *out);
+    if (mfc_tag(d)) return NCI_E_NOTSUP;   /* MIFARE NDEF has no CC to inspect */
+    switch (active_proto(d)) {
+    case NCI_PROTO_ISODEP:
+        if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
+        return t4t_check(facade_apdu, d, out) == NCI_OK ? NCI_OK : NCI_ERR;
+    case NCI_PROTO_T2T: return t2t_ndef_check(d, out);
+    case NCI_PROTO_T5T: return t5t_ndef_check(d, out);
+    case NCI_PROTO_T3T: return t3t_ndef_check(d, out);
+    case NCI_PROTO_T1T: return t1t_ndef_check(d, out);
+    default:            return NCI_E_NO_TAG;
+    }
 }
 
 int nci_ndef_write(nci *d, const uint8_t *msg, size_t len)
 {
     if (!d || (!msg && len)) return NCI_E_INVAL;
-    if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
-    return t4t_write_ndef(facade_apdu, d, msg, len) == NCI_OK ? NCI_OK : NCI_ERR;
+    if (mfc_tag(d))
+        return nci_mfc_ndef_write(d, nci_mfc_key_mad, nci_mfc_key_ndef, msg, len);
+    switch (active_proto(d)) {
+    case NCI_PROTO_ISODEP:
+        if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
+        return t4t_write_ndef(facade_apdu, d, msg, len) == NCI_OK ? NCI_OK : NCI_ERR;
+    case NCI_PROTO_T2T: return nci_t2t_ndef_write(d, msg, len);
+    case NCI_PROTO_T5T: return nci_t5t_ndef_write(d, msg, len);
+    case NCI_PROTO_T1T: return nci_t1t_ndef_write(d, msg, len);
+    case NCI_PROTO_T3T: {
+        uint8_t idm[8];
+        int r = t3t_idm(d, idm);
+        if (r != NCI_OK) return r;
+        return nci_t3t_ndef_write(d, idm, msg, len);
+    }
+    default: return NCI_E_NO_TAG;
+    }
 }
 
 int nci_ndef_format(nci *d)
 {
     if (!d) return NCI_E_INVAL;
-    if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
-    return t4t_format(facade_apdu, d) == NCI_OK ? NCI_OK : NCI_ERR;
+    if (mfc_tag(d))
+        return nci_mfc_format_ndef(d, nci_mfc_key_mad, nci_mfc_key_ndef);
+    switch (active_proto(d)) {
+    case NCI_PROTO_ISODEP:
+        if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
+        return t4t_format(facade_apdu, d) == NCI_OK ? NCI_OK : NCI_ERR;
+    case NCI_PROTO_T2T: return nci_t2t_ndef_format(d);
+    case NCI_PROTO_T5T: return nci_t5t_ndef_format(d);
+    case NCI_PROTO_T1T: return nci_t1t_ndef_format(d);
+    case NCI_PROTO_T3T: {
+        uint8_t idm[8];
+        int r = t3t_idm(d, idm);
+        if (r != NCI_OK) return r;
+        return nci_t3t_ndef_format(d, idm);
+    }
+    default: return NCI_E_NO_TAG;
+    }
 }
 
 int nci_ndef_make_read_only(nci *d)
 {
     if (!d) return NCI_E_INVAL;
-    if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
-    return t4t_make_read_only(facade_apdu, d) == NCI_OK ? NCI_OK : NCI_ERR;
+    if (mfc_tag(d)) return NCI_E_NOTSUP;   /* no MIFARE make-read-only path */
+    switch (active_proto(d)) {
+    case NCI_PROTO_ISODEP:
+        if (!nci_tag_supports_apdu(d)) return NCI_E_NO_TAG;
+        return t4t_make_read_only(facade_apdu, d) == NCI_OK ? NCI_OK : NCI_ERR;
+    case NCI_PROTO_T2T: return nci_t2t_ndef_make_read_only(d);
+    case NCI_PROTO_T5T: return nci_t5t_ndef_make_read_only(d);
+    case NCI_PROTO_T1T: return nci_t1t_ndef_make_read_only(d);
+    case NCI_PROTO_T3T: {
+        uint8_t idm[8];
+        int r = t3t_idm(d, idm);
+        if (r != NCI_OK) return r;
+        return nci_t3t_ndef_make_read_only(d, idm);
+    }
+    default: return NCI_E_NO_TAG;
+    }
 }
 
 /* ---- MIFARE Classic (impl.txt #39-44) -------------------------------- */
