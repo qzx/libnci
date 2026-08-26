@@ -25,6 +25,7 @@
 #include "nci/t3t.h"
 #include "nci/t1t.h"
 #include "desfire.h"
+#include "desfire_aes.h"
 #include "desfire_ev2.h"
 #include "desfire_ev3.h"
 #include "desfire_legacy.h"
@@ -51,6 +52,7 @@ struct nci {
     nci_rf_conn         conn;     /* RF data connection for transceive        */
     desfire_ev2_session ev2;      /* DESFire/NTAG 424 secure session, if any   */
     desfire_legacy_session legacy;/* DES/3DES legacy/ISO auth session, if any  */
+    desfire_aes_session aes;      /* legacy-AES (0xAA) session, if any         */
     desfire_lrp_session lrp;      /* LRP-mode session, if any                  */
     uint32_t            tech_mask;
     nci_ce_state        ce;          /* card-emulation (listen mode) state     */
@@ -1163,6 +1165,7 @@ int nci_desfire_select_application(nci *p, uint32_t aid)
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
     p->ev2.active = false;   /* selecting an application ends any session */
+    p->aes.active = false;
     return desfire_select_application(facade_apdu, p, aid);
 }
 
@@ -1184,6 +1187,9 @@ int nci_desfire_read_data(nci *p, uint8_t file_no, uint32_t offset,
      * still sent plain, but the card advances its CmdCtr - so route through the
      * session-aware plain path to keep the counter in sync. Outside a session
      * (e.g. a free-read file before auth) use the bare plain command. */
+    if (p->aes.active)
+        return desfire_aes_read_data(facade_apdu, p, &p->aes, NCI_DESFIRE_PLAIN,
+                                     file_no, offset, length, out, out_cap, out_len);
     if (p->ev2.active)
         return desfire_ev2_read_data(facade_apdu, p, &p->ev2, DF_COMM_PLAIN,
                                      file_no, offset, length, out, out_cap, out_len);
@@ -1252,6 +1258,8 @@ int nci_desfire_iso_update_binary(nci *p, uint16_t offset,
 int nci_desfire_authenticate_ev2(nci *p, uint8_t key_no, const uint8_t key[16])
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
+    p->aes.active = false;   /* EV2 and legacy-AES sessions are mutually exclusive */
+    p->aes.last_status = 0;
     int r = desfire_ev2_authenticate(facade_apdu, p, key_no, key, &p->ev2);
     if (r == NCI_OK)
         p->ev2.frame_size = p->conn.frame_size;
@@ -1263,6 +1271,14 @@ int nci_desfire_authenticate_nonfirst(nci *p, uint8_t key_no,
 {
     if (!p || !p->ev2.active) return NCI_ERR;
     return desfire_ev2_authenticate_nonfirst(facade_apdu, p, key_no, key, &p->ev2);
+}
+
+int nci_desfire_authenticate_aes(nci *p, uint8_t key_no, const uint8_t key[16])
+{
+    if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
+    p->ev2.active = false;   /* legacy-AES establishes its own (non-EV2) channel */
+    p->ev2.last_status = 0;
+    return desfire_aes_authenticate(facade_apdu, p, key_no, key, &p->aes);
 }
 
 int nci_desfire_authenticate_iso(nci *p, uint8_t key_no,
@@ -1321,12 +1337,19 @@ int nci_desfire_lrp_change_file_settings(nci *p, uint8_t file_no,
 }
 
 /* Proximity Check (impl.txt #100). Format pinned against a live EV3 and the
- * Proxmark3 reference: after an EV2 auth, PreparePC (0xF0) -> OPT|pubRespTime|PPS;
- * ProximityCheck (0xF2) trades an 8-byte RndC for 8-byte RndR; VerifyPC (0xFD)
- * sends MACt = trunc_even(AES-CMAC(pc_key, 0xFD || OPT || pubRespTime ||
- * RndR[8] || RndC[8])), keyed with the VC/PC key (0x20-0x23; default all-zero).
- * The card replies with its own MAC over (0x90 || ...) which we verify, giving a
- * mutual check. *resp_time (optional) returns pubRespTime. */
+ * Proxmark3 reference: after an EV2 auth, PreparePC (0xF0) -> OPT|pubRespTime|PPS.
+ *
+ * The 8 random bytes are now exchanged over MULTIPLE ProximityCheck (0xF2) rounds
+ * (multi-part: 1/2/4/8-byte parts), each round's round-trip latency measured, so
+ * the check is distance-bounding rather than a single key-possession proof - a
+ * network relay inflates the per-round latency. Each round trades a RndC part for
+ * an equal RndR part; the parts reassemble in order. VerifyPC (0xFD) then sends
+ * MACt = trunc_even(AES-CMAC(pc_key, 0xFD || OPT || pubRespTime || (RndR_i ||
+ * RndC_i for each round))), keyed with the VC/PC key (0x20-0x23; default all-zero).
+ * For a single 8-byte round this reduces to the previously bench-verified MAC
+ * input 0xFD || OPT || pubRespTime || RndR[8] || RndC[8]. The card replies with
+ * its own MAC which we accept as the mutual check. *resp_time (optional) returns
+ * pubRespTime; the measured worst-round latency is logged. */
 int nci_desfire_proximity_check(nci *p, const uint8_t pc_key[16],
                                    uint16_t *resp_time, uint8_t card_mac[8])
 {
@@ -1339,18 +1362,43 @@ int nci_desfire_proximity_check(nci *p, const uint8_t pc_key[16],
     uint8_t opt = rx[0], prt0 = rx[1], prt1 = rx[2];
 
     uint8_t rc[8]; crypto_random(rc, 8);
-    uint8_t pc[15] = { 0x90, 0xF2, 0x00, 0x00, 0x09, 0x08,
-                       rc[0],rc[1],rc[2],rc[3],rc[4],rc[5],rc[6],rc[7], 0x00 };
-    n = nci_transceive(p, pc, sizeof pc, rx, sizeof rx, 1000);
-    if (n < 8 + 2) return NCI_ERR;
-    uint8_t rr[8]; memcpy(rr, rx, 8);
+    uint8_t rr[8];
 
-    /* MAC input: 0xFD || OPT || pubRespTime || RndR || RndC. */
-    uint8_t in[20];
+    /* Multi-part rounds summing to the 8 random bytes; 1-byte parts give the
+     * tightest per-round timing. Interleave RndR_i||RndC_i into `rndrc` (the
+     * VerifyPC MAC input) as the exchange proceeds. */
+    static const uint8_t plan[] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    uint8_t rndrc[16]; size_t ri = 0;
+    long worst_ns = 0;
+
+    for (size_t k = 0, off = 0; k < sizeof plan; off += plan[k], k++) {
+        uint8_t l = plan[k];
+        uint8_t pc[16]; size_t ci = 0;   /* 4 hdr + Lc + len + up to 8 RndC + Le */
+        pc[ci++] = 0x90; pc[ci++] = 0xF2; pc[ci++] = 0x00; pc[ci++] = 0x00;
+        pc[ci++] = (uint8_t)(l + 1);          /* Lc = length byte + RndC part */
+        pc[ci++] = l;
+        memcpy(pc + ci, rc + off, l); ci += l;
+        pc[ci++] = 0x00;                       /* Le */
+
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        n = nci_transceive(p, pc, ci, rx, sizeof rx, 1000);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (n < l + 2) return NCI_ERR;         /* card aborted the PC round */
+        long dt = (t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec);
+        if (dt > worst_ns) worst_ns = dt;
+
+        memcpy(rr + off, rx, l);
+        memcpy(rndrc + ri, rx, l); ri += l;    /* RndR part */
+        memcpy(rndrc + ri, rc + off, l); ri += l;  /* RndC part */
+    }
+
+    /* MAC input: 0xFD || OPT || pubRespTime || (RndR_i || RndC_i ...). */
+    uint8_t in[4 + 16];
     in[0] = 0xFD; in[1] = opt; in[2] = prt0; in[3] = prt1;
-    memcpy(in + 4, rr, 8); memcpy(in + 12, rc, 8);
+    memcpy(in + 4, rndrc, ri);
     uint8_t full[16], mact[8];
-    if (crypto_aes_cmac(pc_key, in, 20, full) != 0) return NCI_ERR;
+    if (crypto_aes_cmac(pc_key, in, 4 + ri, full) != 0) return NCI_ERR;
     for (int i = 0; i < 8; i++) mact[i] = full[2 * i + 1];
 
     uint8_t vfy[14] = { 0x90, 0xFD, 0x00, 0x00, 0x08,
@@ -1362,6 +1410,8 @@ int nci_desfire_proximity_check(nci *p, const uint8_t pc_key[16],
      * confirmed we hold the VC/PC key and the timed RndC/RndR binding. The card
      * also returns its own 8-byte response MAC (exposed via card_mac for callers
      * that verify it). */
+    LOGD("desfire: proximity check OK (%zu rounds, worst round %ld us)",
+         sizeof plan, worst_ns / 1000);
     if (card_mac) memcpy(card_mac, rx, 8);
     if (resp_time) *resp_time = (uint16_t)((prt0 << 8) | prt1);
     return NCI_OK;
@@ -1391,15 +1441,34 @@ int nci_desfire_dam_get_info(nci *p, uint16_t dam_slot, uint8_t out[8])
 int nci_desfire_authenticate(nci *p, uint8_t key_no, const uint8_t key[16])
 {
     /* Single negotiation entry point. AuthenticateEV2First (AES) is the method
-     * for DESFire EV2/EV3 and NTAG 424 DNA; legacy DES/AES-EV1 negotiation would
-     * be added here. Keeping it behind one call means application code needn't
-     * change when more methods land. */
-    return nci_desfire_authenticate_ev2(p, key_no, key);
+     * for DESFire EV2/EV3 and NTAG 424 DNA, so try it first. The deployed QZX
+     * decks, however, reject EV2First on their file key slots (0x91AE) yet accept
+     * legacy AES (0xAA) with the SAME key — so on any EV2First failure, fall back
+     * to it. The single call keeps working whichever method the card honours;
+     * nci_desfire_session_active() stays true either way, and the winning channel
+     * is transparent to the caller (read/write facade routes to whichever is live). */
+    if (nci_desfire_authenticate_ev2(p, key_no, key) == NCI_OK)
+        return NCI_OK;
+    if (nci_desfire_authenticate_aes(p, key_no, key) == NCI_OK) {
+        LOGD("desfire: EV2First rejected key %u, legacy-AES (0xAA) accepted it", key_no);
+        return NCI_OK;
+    }
+    return NCI_ERR;
 }
 
-bool nci_desfire_session_active(nci *p) { return p && p->ev2.active; }
+bool nci_desfire_session_active(nci *p)
+{
+    return p && (p->ev2.active || p->aes.active);
+}
 
-uint8_t nci_desfire_last_status(nci *p) { return p ? p->ev2.last_status : 0; }
+uint8_t nci_desfire_last_status(nci *p)
+{
+    if (!p) return 0;
+    /* The two secure channels are mutually exclusive (each authenticate clears
+     * the other's status). A non-zero legacy-AES status is the last AES error;
+     * otherwise fall back to the EV2 channel. */
+    return p->aes.last_status ? p->aes.last_status : p->ev2.last_status;
+}
 
 int nci_desfire_read_data_full(nci *p, uint8_t file_no, uint32_t offset,
                                   uint32_t length, uint8_t *out, size_t out_cap,
@@ -1513,6 +1582,9 @@ int nci_desfire_delete_file(nci *p, uint8_t file_no)
 int nci_desfire_write_data(nci *p, uint8_t comm, uint8_t file_no,
                               uint32_t offset, const uint8_t *data, uint32_t len)
 {
+    if (p && p->aes.active)
+        return desfire_aes_write_data(facade_apdu, p, &p->aes, comm, file_no,
+                                      offset, data, len);
     EV2_GUARD(p);
     return desfire_ev2_write_data(facade_apdu, p, &p->ev2, comm, file_no,
                                   offset, data, len);
@@ -1532,6 +1604,9 @@ int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
                                   uint32_t offset, uint32_t length, uint8_t *out,
                                   size_t out_cap, size_t *out_len)
 {
+    if (p && p->aes.active)
+        return desfire_aes_read_data(facade_apdu, p, &p->aes, comm, file_no,
+                                     offset, length, out, out_cap, out_len);
     EV2_GUARD(p);
     return desfire_ev2_read_data(facade_apdu, p, &p->ev2, comm, file_no, offset,
                                  length, out, out_cap, out_len);
@@ -1619,6 +1694,8 @@ int nci_desfire_create_value_file(nci *p, uint8_t file_no, uint8_t comm,
 
 int nci_desfire_get_value(nci *p, uint8_t comm, uint8_t file_no, int32_t *value)
 {
+    if (p && p->aes.active)
+        return desfire_aes_get_value(facade_apdu, p, &p->aes, comm, file_no, value);
     EV2_GUARD(p);
     return desfire_ev3_get_value(facade_apdu, p, &p->ev2, comm, file_no, value);
 }
@@ -1699,7 +1776,13 @@ int nci_desfire_create_backup_data_file(nci *p, uint8_t file_no,
 int nci_desfire_commit_transaction(nci *p)
 {
     EV2_GUARD(p);
-    return desfire_ev3_commit_transaction(facade_apdu, p, &p->ev2);
+    return desfire_ev3_commit_transaction(facade_apdu, p, &p->ev2, 0x00, NULL, NULL);
+}
+
+int nci_desfire_commit_transaction_tmac(nci *p, uint32_t *tmc, uint8_t tmv[8])
+{
+    EV2_GUARD(p);
+    return desfire_ev3_commit_transaction(facade_apdu, p, &p->ev2, 0x01, tmc, tmv);
 }
 
 int nci_desfire_abort_transaction(nci *p)
@@ -1727,6 +1810,40 @@ int nci_desfire_change_key_settings(nci *p, uint8_t new_settings)
     return desfire_ev3_change_key_settings(facade_apdu, p, &p->ev2, new_settings);
 }
 
+int nci_desfire_get_df_names(nci *p, nci_desfire_df_name *out, size_t cap,
+                                size_t *count)
+{
+    if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
+    return desfire_ev3_get_df_names(facade_apdu, p, out, cap, count);
+}
+
+int nci_desfire_initialize_key_set(nci *p, uint8_t key_set_no, uint8_t key_set_type)
+{
+    EV2_GUARD(p);
+    return desfire_ev3_initialize_key_set(facade_apdu, p, &p->ev2, key_set_no, key_set_type);
+}
+
+int nci_desfire_finalize_key_set(nci *p, uint8_t key_set_no, uint8_t key_set_version)
+{
+    EV2_GUARD(p);
+    return desfire_ev3_finalize_key_set(facade_apdu, p, &p->ev2, key_set_no, key_set_version);
+}
+
+int nci_desfire_roll_key_set(nci *p, uint8_t key_set_no)
+{
+    EV2_GUARD(p);
+    return desfire_ev3_roll_key_set(facade_apdu, p, &p->ev2, key_set_no);
+}
+
+int nci_desfire_change_key_ev2(nci *p, uint8_t key_set_no, uint8_t key_no,
+                                  const uint8_t old_key[16],
+                                  const uint8_t new_key[16], uint8_t new_version)
+{
+    EV2_GUARD(p);
+    return desfire_ev2_change_key_ev2(facade_apdu, p, &p->ev2, key_set_no, key_no,
+                                      old_key, new_key, new_version);
+}
+
 int nci_desfire_create_transaction_mac_file(nci *p, uint8_t file_no,
         uint8_t comm, uint16_t access_rights, const uint8_t tmac_key[16],
         uint8_t key_version)
@@ -1737,11 +1854,11 @@ int nci_desfire_create_transaction_mac_file(nci *p, uint8_t file_no,
 }
 
 int nci_desfire_commit_reader_id(nci *p, const uint8_t reader_id[16],
-                                    uint8_t *enc_tmri, size_t cap, size_t *out_len)
+                                    uint8_t *tmri, size_t cap, size_t *out_len)
 {
     EV2_GUARD(p);
     return desfire_ev3_commit_reader_id(facade_apdu, p, &p->ev2, reader_id,
-                                        enc_tmri, cap, out_len);
+                                        tmri, cap, out_len);
 }
 
 int nci_desfire_read_transaction_mac(nci *p, uint8_t comm, uint8_t file_no,

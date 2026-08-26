@@ -29,7 +29,7 @@ nci_sources = [
   'src/t4t.c', 'src/mifare.c', 'src/mfc_ndef.c', 'src/ndef.c', 'src/ndef_build.c',
   'src/t2t.c', 'src/t5t.c', 'src/t3t.c', 'src/t1t.c',
   'src/desfire.c', 'src/desfire_aes.c', 'src/desfire_ev2.c', 'src/desfire_ev3.c', 'src/desfire_legacy.c',
-  'src/desfire_lrp.c', 'src/desfire_dam.c',
+  'src/desfire_lrp.c', 'src/desfire_dam.c', 'src/desfire_hl.c', 'src/desfire_provision.c',
   'src/crypto.c', 'src/crc.c', 'src/sdm.c', 'src/lrp.c', 'src/log.c',
 ]
 nci_deps  = [libcrypto, libthreads]
@@ -187,9 +187,44 @@ test_t1t = executable('test_t1t',
   include_directories: inc_all)
 test('t1t', test_t1t)
 
-# NTAG 424 DNA SDM / SUN verifier (AN12196 primitives)
+# NTAG 424 DNA SDM / SUN verifier (AN12196 primitives). sdm.c's LRP-SUN path
+# (nci_sdm_verify_lrp) pulls in the lrp primitive, so link src/lrp.c too.
 test_sdm = executable('test_sdm',
-  ['tests/test_sdm.c', 'src/sdm.c', 'src/crypto.c', 'src/log.c'],
+  ['tests/test_sdm.c', 'src/sdm.c', 'src/lrp.c', 'src/crypto.c', 'src/log.c'],
   include_directories: inc_all,
   dependencies: [libcrypto])
 test('sdm', test_sdm)
+
+# Legacy-AES (0xAA) DESFire session: the pure session-key derivation KAT plus a
+# hardware-free 0xAA handshake against a mock card. desfire_aes.c reaches the
+# card through desfire_apdu_raw (desfire.c); crypto.c supplies AES-CBC/CMAC.
+test_desfire_aes = executable('test_desfire_aes',
+  ['tests/test_desfire_aes.c', 'src/desfire_aes.c', 'src/desfire.c',
+   'src/crypto.c', 'src/log.c'],
+  include_directories: inc_all,
+  dependencies: [libcrypto])
+test('desfire_aes', test_desfire_aes)
+
+# DESFire high-level client flows: only the pure GetFileSettings parser
+# (nci_desfire_parse_file_settings) is unit-tested; the surrounding one-call
+# flows are integration-only. The module's translation unit still references the
+# device-layer symbols (select/authenticate/discovery in device.c), whose
+# closure is essentially the whole stack, so link the built library rather than
+# recompiling a source subset (which would also double-define the pure helper).
+test_desfire_hl = executable('test_desfire_hl',
+  ['tests/test_desfire_hl.c'],
+  include_directories: inc_all,
+  link_with: nci_lib,
+  dependencies: nci_deps)
+test('desfire_hl', test_desfire_hl)
+
+# NTAG 424 SUN provisioning: unit-tests the pure template builder
+# (nci_sun_build_template); the live provision_* flows are integration-only but
+# their TU pulls in the DESFire/SDM/device closure, so link the library. sdm/AES
+# helpers come in transitively via nci_lib.
+test_provision = executable('test_provision',
+  ['tests/test_provision.c'],
+  include_directories: inc_all,
+  link_with: nci_lib,
+  dependencies: nci_deps)
+test('provision', test_provision)

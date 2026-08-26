@@ -7,6 +7,7 @@
  * byte layouts are new here.
  */
 #include "desfire_ev3.h"
+#include "desfire.h"       /* desfire_apdu_raw (GetDFNames is session-less) */
 #include "log.h"
 #include <string.h>
 
@@ -211,9 +212,29 @@ int desfire_ev3_create_backup_data_file(apdu_fn fn, void *ctx,
                                 false, false, out, sizeof out, &rn);
 }
 
-int desfire_ev3_commit_transaction(apdu_fn fn, void *ctx, desfire_ev2_session *s)
+/* CommitTransaction (0xC7), CommMode.MAC. On a TMAC-enabled application the
+ * commit MUST carry option 0x01 to complete, and the card answers with the new
+ * TMAC counter TMC (4 bytes, LE) followed by the Transaction MAC value TMV (8).
+ * option 0x00 is the plain commit for applications with no TransactionMAC file
+ * (sending no option byte at all). (AN12752 §10.3.2.) */
+int desfire_ev3_commit_transaction(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                   uint8_t option, uint32_t *tmc, uint8_t tmv[8])
 {
     uint8_t out[32]; size_t rn = 0;
+    if (option & 0x01) {
+        if (desfire_ev2_transact(fn, ctx, s, 0xC7, &option, 1, NULL, 0,
+                                 false, false, out, sizeof out, &rn) != NCI_OK)
+            return NCI_ERR;
+        if (rn >= 12) {
+            if (tmc) *tmc = (uint32_t)out[0] | ((uint32_t)out[1] << 8) |
+                            ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24);
+            if (tmv) memcpy(tmv, out + 4, 8);
+        } else {                       /* app without a TMAC file: no TMC/TMV */
+            if (tmc) *tmc = 0;
+            if (tmv) memset(tmv, 0, 8);
+        }
+        return NCI_OK;
+    }
     return desfire_ev2_transact(fn, ctx, s, 0xC7, NULL, 0, NULL, 0,
                                 false, false, out, sizeof out, &rn);
 }
@@ -265,6 +286,76 @@ int desfire_ev3_change_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *
                                 true, false, out, sizeof out, &rn);
 }
 
+/* ---- key-set management (impl.txt P2; AN12752 §10.4) ------------------ *
+ * A multi-key-set application can stage a whole new key set and atomically
+ * switch to it. All three run in-session, CommMode.MAC.
+ *   InitializeKeySet (0x56): create/clear key set `key_set_no` of `key_set_type`
+ *     (0x00 = AES-128) so its keys can be written with ChangeKeyEV2.
+ *   FinalizeKeySet   (0x57): mark the staged key set complete at version.
+ *   RollKeySet       (0x55): make the finalized key set the active one. */
+int desfire_ev3_initialize_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                   uint8_t key_set_no, uint8_t key_set_type)
+{
+    uint8_t hdr[2] = { key_set_no, key_set_type };
+    uint8_t out[16]; size_t rn = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0x56, hdr, 2, NULL, 0,
+                                false, false, out, sizeof out, &rn);
+}
+
+int desfire_ev3_finalize_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                 uint8_t key_set_no, uint8_t key_set_version)
+{
+    uint8_t hdr[2] = { key_set_no, key_set_version };
+    uint8_t out[16]; size_t rn = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0x57, hdr, 2, NULL, 0,
+                                false, false, out, sizeof out, &rn);
+}
+
+int desfire_ev3_roll_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                             uint8_t key_set_no)
+{
+    uint8_t out[16]; size_t rn = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0x55, &key_set_no, 1, NULL, 0,
+                                false, false, out, sizeof out, &rn);
+}
+
+/* GetDFNames (0x6D): PICC-level enumeration of applications that carry an ISO DF
+ * name. Issued WITHOUT a secure session (select the PICC level, do not
+ * authenticate). Each response frame is one application: AID(3, LSB) || ISO
+ * FileID(2, LSB) || DF-Name(0..16). The card chains frames with 0x91AF until the
+ * final 0x9100 (an empty final frame is normal). */
+int desfire_ev3_get_df_names(apdu_fn fn, void *ctx, nci_desfire_df_name *out,
+                             size_t cap, size_t *count)
+{
+    size_t found = 0;
+    uint8_t ins = 0x6D;
+    for (;;) {
+        uint8_t buf[64]; size_t n = 0; uint8_t st = 0;
+        if (desfire_apdu_raw(fn, ctx, ins, NULL, 0, buf, sizeof buf, &n, &st) != NCI_OK)
+            return NCI_ERR;
+        if (st != 0x00 && st != 0xAF) {
+            LOGE("ev3: GetDFNames status 0x91%02x", st);
+            return NCI_ERR;
+        }
+        if (n >= 5) {                          /* AID(3) + FID(2) [+ name] */
+            if (out && found < cap) {
+                nci_desfire_df_name *e = &out[found];
+                e->aid = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16);
+                e->iso_fid = (uint16_t)(buf[3] | (buf[4] << 8));
+                size_t nl = n - 5;
+                if (nl > sizeof e->name) nl = sizeof e->name;
+                memcpy(e->name, buf + 5, nl);
+                e->name_len = (uint8_t)nl;
+            }
+            found++;
+        }
+        if (st == 0x00) break;                 /* last frame */
+        ins = 0xAF;                            /* pull the next application */
+    }
+    if (count) *count = found;
+    return NCI_OK;
+}
+
 /* ---- EV3 Transaction MAC (impl.txt #97-99) ---------------------------- *
  * A TransactionMAC file makes the card emit a MAC over every committed
  * transaction in its application; an optional CommitReaderID binds a reader
@@ -293,18 +384,21 @@ int desfire_ev3_create_transaction_mac_file(apdu_fn fn, void *ctx,
 }
 
 /* CommitReaderID (0xC8), CommMode.Full: bind a 16-byte Reader ID into the
- * current transaction. The card returns the enciphered TMRI when configured. */
+ * current transaction. The Reader ID is enciphered in the command; the card
+ * returns the encrypted TMRI (the PREVIOUS transaction's Reader ID, card-side
+ * re-enciphered) which — being carried in CommMode.Full — the session decrypts
+ * for us. On the first commit (no prior Reader ID) the response carries no TMRI
+ * and *out_len is 0. Returns the decrypted 16-byte TMRI in `tmri`. (AN12752.) */
 int desfire_ev3_commit_reader_id(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                  const uint8_t reader_id[16],
-                                 uint8_t *enc_tmri, size_t cap, size_t *out_len)
+                                 uint8_t *tmri, size_t cap, size_t *out_len)
 {
     uint8_t out[32]; size_t rn = 0;
-    /* CommMode.MAC: the 16-byte Reader ID is sent plain+MAC; the card returns
-     * the (already card-enciphered) TMRI transmitted plain+MAC. */
-    if (desfire_ev2_transact(fn, ctx, s, 0xC8, reader_id, 16, NULL, 0,
-                             false, false, out, sizeof out, &rn) != NCI_OK)
+    if (desfire_ev2_transact(fn, ctx, s, 0xC8, NULL, 0, reader_id, 16,
+                             true /*tx_enc: CommMode.Full*/, true /*rx_enc*/,
+                             out, sizeof out, &rn) != NCI_OK)
         return NCI_ERR;
-    if (enc_tmri) { size_t m = rn < cap ? rn : cap; memcpy(enc_tmri, out, m); }
+    if (tmri) { size_t m = rn < cap ? rn : cap; memcpy(tmri, out, m); }
     if (out_len) *out_len = rn;
     return NCI_OK;
 }

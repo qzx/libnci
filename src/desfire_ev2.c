@@ -680,6 +680,41 @@ int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
     return NCI_OK;
 }
 
+/* ChangeKeyEV2 (0xC6): change a key in a specific key set. Header is
+ * [KeySetNo][KeyNo]; the cryptogram is the cross-key form (NewKey^OldKey ||
+ * NewKeyVersion || CRC32(NewKey) || pad), enciphered with the command IV. A key
+ * in a not-yet-active key set is never the authenticated key, so the session is
+ * NOT invalidated here (unlike same-key ChangeKey). AES-128 keys. (AN12752.) */
+int desfire_ev2_change_key_ev2(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                               uint8_t key_set_no, uint8_t key_no,
+                               const uint8_t old_key[16], const uint8_t new_key[16],
+                               uint8_t new_version)
+{
+    if (!s || !s->active || !old_key || !new_key) return NCI_ERR;
+
+    uint8_t plain[48]; size_t pl = 0;
+    for (int i = 0; i < 16; i++) plain[pl + i] = old_key[i] ^ new_key[i];
+    pl += 16;
+    plain[pl++] = new_version;
+    uint32_t crc = crypto_crc32_desfire(new_key, 16);
+    plain[pl++] = (uint8_t)(crc & 0xFF);
+    plain[pl++] = (uint8_t)((crc >> 8) & 0xFF);
+    plain[pl++] = (uint8_t)((crc >> 16) & 0xFF);
+    plain[pl++] = (uint8_t)((crc >> 24) & 0xFF);
+    plain[pl++] = 0x80;                           /* method-2 padding */
+    while (pl % 16) plain[pl++] = 0x00;
+
+    uint8_t ivc[16];
+    if (build_iv(s, 0xA5, 0x5A, ivc) != 0) return NCI_ERR;
+    uint8_t enc[48];
+    if (crypto_aes_cbc_encrypt(s->ses_enc, ivc, plain, pl, enc) != 0) return NCI_ERR;
+
+    uint8_t hdr[2] = { key_set_no, key_no };
+    uint8_t out[16]; size_t n = 0;
+    return desfire_ev2_transact(fn, ctx, s, 0xC6, hdr, 2, enc, pl,
+                                false, false, out, sizeof out, &n);
+}
+
 int desfire_ev2_get_card_uid(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                              uint8_t uid[7])
 {

@@ -142,6 +142,12 @@ int desfire_ev2_get_key_version(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 int desfire_ev2_change_key(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                            uint8_t key_no, const uint8_t old_key[16],
                            const uint8_t new_key[16], uint8_t new_version);
+/* ChangeKeyEV2 (0xC6): change key `key_no` in key set `key_set_no` (cross-key
+ * cryptogram; does not end the session). AES-128. */
+int desfire_ev2_change_key_ev2(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                               uint8_t key_set_no, uint8_t key_no,
+                               const uint8_t old_key[16], const uint8_t new_key[16],
+                               uint8_t new_version);
 
 int desfire_ev2_change_file_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                      uint8_t comm, uint8_t file_no, uint8_t file_option,

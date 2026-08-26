@@ -98,6 +98,16 @@ int nci_desfire_authenticate_legacy(nci *p, uint8_t key_no,
 int nci_desfire_authenticate_iso(nci *p, uint8_t key_no,
                                     const uint8_t *key, size_t key_len);
 
+/* AuthenticateAES (0xAA): the DESFire EV1-era ("legacy") AES-128 authentication,
+ * establishing the pre-EV2 native AES secure-messaging session. This is the
+ * route the deployed QZX decks require — their file key slots reject
+ * AuthenticateEV2First (0x91AE) yet accept legacy AES with the same key. After
+ * NCI_OK the read/write facade (nci_desfire_read_data[_comm], write_data,
+ * get_value) runs under this session, MACing/enciphering per the file's comm
+ * mode with the response CMAC verified. Mutually exclusive with an EV2 session.
+ * Select the owning application first. Returns NCI_OK or NCI_ERR (wrong key). */
+int nci_desfire_authenticate_aes(nci *p, uint8_t key_no, const uint8_t key[16]);
+
 /* ---- Delegated Application Management (impl.txt #101) ----------------- *
  * A third party holding the DAM keys creates an application in a DAM slot.
  * CreateDelegatedApplication needs an active EV2 session authenticated with the
@@ -294,6 +304,11 @@ int nci_desfire_create_backup_data_file(nci *p, uint8_t file_no,
                                            int iso_file_id, uint8_t comm,
                                            uint16_t access_rights, uint32_t size);
 int nci_desfire_commit_transaction(nci *p);
+/* CommitTransaction on a TMAC-enabled application: sends option 0x01 and returns
+ * the new TMAC counter (*tmc) and 8-byte Transaction MAC value (tmv). Both out
+ * params may be NULL. Use this (not nci_desfire_commit_transaction) whenever the
+ * application carries a TransactionMAC file. */
+int nci_desfire_commit_transaction_tmac(nci *p, uint32_t *tmc, uint8_t tmv[8]);
 int nci_desfire_abort_transaction(nci *p);
 
 /* ---- EV3: queries ----------------------------------------------------- */
@@ -301,6 +316,37 @@ int nci_desfire_get_iso_file_ids(nci *p, uint16_t *ids, size_t cap,
                                     size_t *count);
 int nci_desfire_get_key_settings(nci *p, uint8_t *settings, uint8_t *max_keys);
 int nci_desfire_change_key_settings(nci *p, uint8_t new_settings);
+
+/* One GetDFNames entry: an application's 24-bit AID, its ISO DF FileID, and its
+ * ISO DF name (0..16 bytes). */
+typedef struct {
+    uint32_t aid;
+    uint16_t iso_fid;
+    uint8_t  name[16];
+    uint8_t  name_len;
+} nci_desfire_df_name;
+
+/* GetDFNames (0x6D): enumerate applications that carry an ISO DF name, mapping
+ * AIDs to their ISO DF FileID + name. PICC-level: select AID 0x000000 first and
+ * do NOT authenticate (no active secure session). *count is the total found
+ * (may exceed cap; only cap entries are written). */
+int nci_desfire_get_df_names(nci *p, nci_desfire_df_name *out, size_t cap,
+                                size_t *count);
+
+/* ---- EV3: multi-key-set management (impl.txt P2; AN12752 §10.4) -------- *
+ * Stage and atomically switch a whole key set. All require an active EV2
+ * session with sufficient rights. Write the staged set's keys with
+ * nci_desfire_change_key_ev2 between initialize and finalize. */
+int nci_desfire_initialize_key_set(nci *p, uint8_t key_set_no,
+                                      uint8_t key_set_type);
+int nci_desfire_finalize_key_set(nci *p, uint8_t key_set_no,
+                                    uint8_t key_set_version);
+int nci_desfire_roll_key_set(nci *p, uint8_t key_set_no);
+/* ChangeKeyEV2 (0xC6): change key `key_no` in key set `key_set_no` to an AES-128
+ * key. Cross-key cryptogram (supply the current key); does not end the session. */
+int nci_desfire_change_key_ev2(nci *p, uint8_t key_set_no, uint8_t key_no,
+                                  const uint8_t old_key[16],
+                                  const uint8_t new_key[16], uint8_t new_version);
 
 /* ---- EV3: Transaction MAC (impl.txt #97-99) -------------------------- *
  * Create a TransactionMAC file (#98) so the app MACs every committed
@@ -310,8 +356,11 @@ int nci_desfire_change_key_settings(nci *p, uint8_t new_settings);
 int nci_desfire_create_transaction_mac_file(nci *p, uint8_t file_no,
         uint8_t comm, uint16_t access_rights, const uint8_t tmac_key[16],
         uint8_t key_version);
+/* CommitReaderID (#97), CommMode.Full: binds a 16-byte Reader ID into the
+ * current transaction. Returns the DECRYPTED TMRI (previous transaction's Reader
+ * ID) in `tmri`; *out_len is 0 on the first commit (no prior Reader ID). */
 int nci_desfire_commit_reader_id(nci *p, const uint8_t reader_id[16],
-                                    uint8_t *enc_tmri, size_t cap, size_t *out_len);
+                                    uint8_t *tmri, size_t cap, size_t *out_len);
 int nci_desfire_read_transaction_mac(nci *p, uint8_t comm, uint8_t file_no,
                                         uint32_t *tmac_counter, uint8_t tmv[8]);
 

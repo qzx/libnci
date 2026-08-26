@@ -9,6 +9,7 @@
  */
 #include "nci/sdm.h"
 #include "crypto.h"
+#include "lrp.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -101,6 +102,156 @@ static void test_verify_with_filedata(void)
     printf("  verify_with_filedata: OK (file data decrypted, MAC valid)\n");
 }
 
+/* Append the lowercase hex of `buf` to a NUL-terminated string. */
+static void hexcat(char *dst, const uint8_t *buf, size_t n)
+{
+    static const char h[] = "0123456789abcdef";
+    size_t p = strlen(dst);
+    for (size_t i = 0; i < n; i++) {
+        dst[p++] = h[buf[i] >> 4];
+        dst[p++] = h[buf[i] & 0x0F];
+    }
+    dst[p] = '\0';
+}
+
+static void test_verify_url(void)
+{
+    uint8_t enc[16];
+    make_enc_picc(enc);
+
+    /* Mirror a block of file data the tag's way; the CMAC covers those raw
+     * encrypted bytes (the &enc= value hex-decoded). */
+    uint8_t ses_enc[16], ses_mac[16];
+    assert(nci_sdm_session_keys(FILE_KEY, UID, READ_CTR, ses_enc, ses_mac) == NCI_OK);
+    const uint8_t plain[16] = "url-payload-16";
+    uint8_t ivin[16] = { 0 };
+    ivin[0] = READ_CTR & 0xFF;
+    uint8_t iv[16];
+    assert(crypto_aes_ecb_encrypt(ses_enc, ivin, iv) == 0);
+    uint8_t enc_file[16];
+    assert(crypto_aes_cbc_encrypt(ses_enc, iv, plain, 16, enc_file) == 0);
+    uint8_t cmac[8];
+    assert(nci_sdm_mac(ses_mac, enc_file, 16, cmac) == NCI_OK);
+
+    char url[256] = "https://tap.example/?picc_data=";
+    hexcat(url, enc, 16);
+    strcat(url, "&enc=");
+    hexcat(url, enc_file, 16);
+    strcat(url, "&cmac=");
+    hexcat(url, cmac, 8);
+
+    nci_sdm_result res;
+    assert(nci_sdm_verify_url(url, META_KEY, FILE_KEY, &res) == NCI_OK);
+    assert(res.mac_valid);
+    assert(memcmp(res.uid, UID, 7) == 0 && res.read_ctr == READ_CTR);
+    assert(res.file_data_len == 16 && memcmp(res.file_data, plain, 16) == 0);
+
+    /* Tamper the last cmac hex nibble: still decodes (NCI_OK) but MAC invalid. */
+    char bad[256];
+    strcpy(bad, url);
+    size_t last = strlen(bad) - 1;
+    bad[last] = (bad[last] == 'a') ? 'b' : 'a';
+    assert(nci_sdm_verify_url(bad, META_KEY, FILE_KEY, &res) == NCI_OK);
+    assert(!res.mac_valid);
+
+    /* PICC-only URL (no &enc=): empty MAC input. */
+    uint8_t cmac0[8];
+    assert(nci_sdm_mac(ses_mac, NULL, 0, cmac0) == NCI_OK);
+    char url0[256] = "https://tap.example/?picc_data=";
+    hexcat(url0, enc, 16);
+    strcat(url0, "&cmac=");
+    hexcat(url0, cmac0, 8);
+    assert(nci_sdm_verify_url(url0, META_KEY, FILE_KEY, &res) == NCI_OK);
+    assert(res.mac_valid && res.file_data_len == 0);
+
+    /* Missing picc_data -> hard decode error (negative), nothing recovered. */
+    assert(nci_sdm_verify_url("https://tap.example/?cmac=00", META_KEY,
+                              FILE_KEY, &res) < 0);
+    printf("  verify_url: OK (round-trip valid, tamper !mac_valid, picc-only, malformed rejected)\n");
+}
+
+static void test_verify_plain(void)
+{
+    /* Plain mirror: UID/counter are cleartext; only the SDMMAC binds them.
+     * Use the same session MAC key derivation, over a non-empty MAC input. */
+    uint8_t ses_mac[16];
+    assert(nci_sdm_session_keys(FILE_KEY, UID, READ_CTR, NULL, ses_mac) == NCI_OK);
+
+    const uint8_t mac_input[16] = "04958CAA5C5E80"; /* stand-in mirror bytes */
+    uint8_t cmac[8];
+    assert(nci_sdm_mac(ses_mac, mac_input, sizeof mac_input, cmac) == NCI_OK);
+
+    nci_sdm_result res;
+    assert(nci_sdm_verify_plain(FILE_KEY, UID, READ_CTR, mac_input,
+                                sizeof mac_input, cmac, &res) == NCI_OK);
+    assert(res.mac_valid);
+    assert(memcmp(res.uid, UID, 7) == 0 && res.read_ctr == READ_CTR);
+    assert(res.file_data_len == 0);
+
+    /* Tamper a MAC byte -> rejected. */
+    cmac[3] ^= 0xFF;
+    assert(nci_sdm_verify_plain(FILE_KEY, UID, READ_CTR, mac_input,
+                                sizeof mac_input, cmac, &res) == NCI_E_AUTH);
+    assert(!res.mac_valid);
+
+    /* Empty MAC input (PICC-only plain mirror) also round-trips. */
+    uint8_t cmac0[8];
+    assert(nci_sdm_mac(ses_mac, NULL, 0, cmac0) == NCI_OK);
+    assert(nci_sdm_verify_plain(FILE_KEY, UID, READ_CTR, NULL, 0, cmac0, &res)
+           == NCI_OK);
+    assert(res.mac_valid);
+    printf("  verify_plain: OK (cleartext UID/ctr, MAC accepted, tamper rejected)\n");
+}
+
+static void test_verify_lrp(void)
+{
+    /* Build the LRP-mode counterparts of make_enc_picc + the SDMMAC, then check
+     * nci_sdm_verify_lrp inverts them (AN12196 LRP variant). */
+    uint8_t plain[16] = { 0 };
+    plain[0] = 0xC7;
+    memcpy(plain + 1, UID, 7);
+    plain[8]  = READ_CTR & 0xFF;
+    plain[9]  = (READ_CTR >> 8) & 0xFF;
+    plain[10] = (READ_CTR >> 16) & 0xFF;
+
+    lrp_ctx meta_ctx;
+    lrp_init(&meta_ctx, META_KEY);
+    uint8_t ctr0[4] = { 0 };
+    uint8_t enc_picc[16];
+    assert(lrp_lricb(&meta_ctx, 0, ctr0, plain, 16, enc_picc, 1) == 0);
+
+    /* SesSDMFileReadMACKey = LRP-CMAC(FILE_KEY, 3C C3 00 01 00 80 || UID || ctr). */
+    uint8_t sv[16] = { 0x3C, 0xC3, 0x00, 0x01, 0x00, 0x80 };
+    memcpy(sv + 6, UID, 7);
+    sv[13] = READ_CTR & 0xFF;
+    sv[14] = (READ_CTR >> 8) & 0xFF;
+    sv[15] = (READ_CTR >> 16) & 0xFF;
+    lrp_ctx file_ctx;
+    lrp_init(&file_ctx, FILE_KEY);
+    uint8_t ses_mac[16];
+    lrp_cmac(&file_ctx, sv, sizeof sv, ses_mac);
+
+    const uint8_t mac_input[16] = "lrp-mac-input";
+    lrp_ctx ses_ctx;
+    lrp_init(&ses_ctx, ses_mac);
+    uint8_t full[16], cmac[8];
+    lrp_cmac(&ses_ctx, mac_input, sizeof mac_input, full);
+    for (int i = 0; i < 8; i++) cmac[i] = full[2 * i + 1];
+
+    nci_sdm_result res;
+    assert(nci_sdm_verify_lrp(META_KEY, FILE_KEY, enc_picc, mac_input,
+                              sizeof mac_input, cmac, &res) == NCI_OK);
+    assert(res.mac_valid);
+    assert(memcmp(res.uid, UID, 7) == 0 && res.read_ctr == READ_CTR);
+    assert(res.file_data_len == 0);   /* LRP file-data decrypt is deferred */
+
+    cmac[0] ^= 0xFF;
+    assert(nci_sdm_verify_lrp(META_KEY, FILE_KEY, enc_picc, mac_input,
+                              sizeof mac_input, cmac, &res) == NCI_E_AUTH);
+    assert(!res.mac_valid);
+    printf("  verify_lrp: OK (LRP PICC recovered, LRP-CMAC valid, tamper rejected)\n");
+}
+
 static void test_helpers(void)
 {
     uint8_t b[4];
@@ -174,6 +325,9 @@ int main(void)
     test_picc_roundtrip();
     test_verify_picc_only();
     test_verify_with_filedata();
+    test_verify_url();
+    test_verify_plain();
+    test_verify_lrp();
     test_encode_settings();
     test_helpers();
     printf("all tests passed\n");

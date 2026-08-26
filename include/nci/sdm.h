@@ -74,6 +74,49 @@ int nci_sdm_verify(const uint8_t meta_key[16], const uint8_t file_key[16],
                    const uint8_t *mac_input, size_t mac_input_len,
                    const uint8_t cmac[8], nci_sdm_result *out);
 
+/* Verify a SUN URL end to end (encrypted-PICC mirroring). Pulls the
+ * picc_data / enc / cmac query parameters, hex-decodes them, reconstructs the
+ * CMAC input range (the raw bytes of &enc=, empty when absent) and runs
+ * nci_sdm_verify. The MAC mismatch that nci_sdm_verify reports as NCI_E_AUTH is
+ * folded into a successful decode here: on return NCI_OK means the URL decoded
+ * and *out is filled (UID, counter, decrypted file data) - inspect
+ * out->mac_valid for authenticity. A negative nci_status means a required
+ * parameter was missing or malformed (nothing decoded). */
+int nci_sdm_verify_url(const char *url, const uint8_t meta_key[16],
+                       const uint8_t file_key[16], nci_sdm_result *out);
+
+/* Verify a plain / standard-mirror SUN message: the UID and SDMReadCtr are
+ * mirrored in cleartext (ASCII) in the URL - there is no encrypted PICCData -
+ * and only the SDMMAC binds them. The caller supplies the already-parsed UID
+ * and counter (from the cleartext mirrors) plus the exact SDMMAC input range.
+ * Derives the SDM session MAC key from file_key/uid/read_ctr, recomputes the
+ * truncated SDMMAC over mac_input and compares. out->uid/read_ctr are echoed
+ * and out->mac_valid is set; no file data is decrypted. Returns NCI_OK on a
+ * MAC match, NCI_E_AUTH (out filled, mac_valid=false) on mismatch. */
+int nci_sdm_verify_plain(const uint8_t file_key[16], const uint8_t uid[7],
+                         uint32_t read_ctr, const uint8_t *mac_input,
+                         size_t mac_input_len, const uint8_t cmac[8],
+                         nci_sdm_result *out);
+
+/* LRP-mode SDM verify (AN12196 / AN12304 LRP variant of the above). For tags
+ * configured in LRP secure messaging the SDM crypto uses the LRP primitives
+ * (src/lrp.c) instead of AES-CMAC:
+ *   - PICCData is decrypted with LRICB under the SDMMetaRead key (updated
+ *     key 0, 4-byte counter 0), recovering UID + SDMReadCtr;
+ *   - the session MAC key is SesSDMFileReadMACKey = LRP-CMAC(KSDMFileRead,
+ *     3C C3 00 01 00 80 || UID || SDMReadCtr);
+ *   - the SDMMAC is the odd-byte truncation of LRP-CMAC(SesSDMFileReadMACKey,
+ *     mac_input), matching the AES-mode truncation rule.
+ * Returns NCI_OK on a MAC match, NCI_E_AUTH (out filled, mac_valid=false) on
+ * mismatch, or another negative nci_status on a decode error.
+ *
+ * DEFERRED: LRP SDMENCFileData decryption is not wired here (out->file_data_len
+ * stays 0); only PICCData recovery and SDMMAC verification are implemented. */
+int nci_sdm_verify_lrp(const uint8_t meta_key[16], const uint8_t file_key[16],
+                       const uint8_t enc_picc[16],
+                       const uint8_t *mac_input, size_t mac_input_len,
+                       const uint8_t cmac[8], nci_sdm_result *out);
+
 typedef struct {
     uint8_t  sdm_options;          /* SDMOptions (Bit 7: UID, Bit 6: Ctr, Bit 5: CtrLimit, Bit 4: EncData, Bit 0: EncMode) */
     uint16_t sdm_access_rights;    /* SDMAccessRights, AN12196 §4.4 nibble order:

@@ -4,6 +4,8 @@
  */
 #include "nci/sdm.h"
 #include "crypto.h"
+#include "lrp.h"
+#include "log.h"
 #include <string.h>
 
 static void ctr_le3(uint32_t ctr, uint8_t out[3])
@@ -113,6 +115,126 @@ int nci_sdm_verify(const uint8_t meta_key[16], const uint8_t file_key[16],
                                       enc_file_len, out->file_data) == NCI_OK)
             out->file_data_len = enc_file_len;
     }
+    return out->mac_valid ? NCI_OK : NCI_E_AUTH;
+}
+
+int nci_sdm_verify_plain(const uint8_t file_key[16], const uint8_t uid[7],
+                         uint32_t read_ctr, const uint8_t *mac_input,
+                         size_t mac_input_len, const uint8_t cmac[8],
+                         nci_sdm_result *out)
+{
+    if (!file_key || !uid || !cmac || !out) return NCI_E_INVAL;
+    memset(out, 0, sizeof *out);
+    memcpy(out->uid, uid, 7);
+    out->read_ctr = read_ctr;
+
+    /* No encrypted PICCData: the UID/counter arrive in cleartext (ASCII mirror)
+     * and only the SDMMAC binds them. Derive just the session MAC key. */
+    uint8_t ses_mac[16];
+    int r = nci_sdm_session_keys(file_key, uid, read_ctr, NULL, ses_mac);
+    if (r != NCI_OK) return r;
+
+    uint8_t mac[8];
+    r = nci_sdm_mac(ses_mac, mac_input, mac_input_len, mac);
+    if (r != NCI_OK) return r;
+    out->mac_valid = (memcmp(mac, cmac, 8) == 0);
+    return out->mac_valid ? NCI_OK : NCI_E_AUTH;
+}
+
+int nci_sdm_verify_url(const char *url, const uint8_t meta_key[16],
+                       const uint8_t file_key[16], nci_sdm_result *out)
+{
+    if (!url || !meta_key || !file_key || !out) return NCI_E_INVAL;
+
+    char pbuf[64], cbuf[64], ebuf[520];
+    uint8_t enc_picc[16], cmac[8];
+    uint8_t enc_file[256];
+    size_t enc_file_len = 0;
+
+    if (nci_url_param(url, "picc_data", pbuf, sizeof pbuf) < 0) {
+        LOGE("sdm: SUN url missing picc_data");
+        return NCI_E_INVAL;
+    }
+    if (nci_hex2bin(pbuf, enc_picc, sizeof enc_picc) != 16) {
+        LOGE("sdm: SUN url picc_data not 16 bytes");
+        return NCI_E_INVAL;
+    }
+    if (nci_url_param(url, "cmac", cbuf, sizeof cbuf) < 0) {
+        LOGE("sdm: SUN url missing cmac");
+        return NCI_E_INVAL;
+    }
+    if (nci_hex2bin(cbuf, cmac, sizeof cmac) != 8) {
+        LOGE("sdm: SUN url cmac not 8 bytes");
+        return NCI_E_INVAL;
+    }
+
+    /* &enc= is optional: when present its raw bytes are both the SDMENCFileData
+     * to decrypt and (per the offset config) the SDMMAC input range. */
+    const uint8_t *mac_input = NULL;
+    size_t mac_input_len = 0;
+    if (nci_url_param(url, "enc", ebuf, sizeof ebuf) >= 0) {
+        int n = nci_hex2bin(ebuf, enc_file, sizeof enc_file);
+        if (n < 0) { LOGE("sdm: SUN url enc malformed"); return NCI_E_INVAL; }
+        enc_file_len = (size_t)n;
+        mac_input = enc_file;
+        mac_input_len = enc_file_len;
+    }
+
+    int r = nci_sdm_verify(meta_key, file_key, enc_picc,
+                           enc_file_len ? enc_file : NULL, enc_file_len,
+                           mac_input, mac_input_len, cmac, out);
+    /* A MAC mismatch is a successful decode with an invalid signature: *out is
+     * populated and out->mac_valid is false. Report that as NCI_OK so the
+     * caller distinguishes "could not decode" (negative) from "decoded, bad
+     * MAC" (NCI_OK + !mac_valid). Other errors propagate. */
+    if (r == NCI_E_AUTH) return NCI_OK;
+    return r;
+}
+
+int nci_sdm_verify_lrp(const uint8_t meta_key[16], const uint8_t file_key[16],
+                       const uint8_t enc_picc[16],
+                       const uint8_t *mac_input, size_t mac_input_len,
+                       const uint8_t cmac[8], nci_sdm_result *out)
+{
+    if (!meta_key || !file_key || !enc_picc || !cmac || !out) return NCI_E_INVAL;
+    memset(out, 0, sizeof *out);
+
+    /* PICCData decrypt: LRICB under the SDMMetaRead key (updated key 0,
+     * counter 0). Layout matches AES mode: tag(1) || UID(7) || ctr(3, LSB). */
+    lrp_ctx meta_ctx;
+    lrp_init(&meta_ctx, meta_key);
+    uint8_t ctr0[4] = { 0 };
+    uint8_t plain[16];
+    if (lrp_lricb(&meta_ctx, 0, ctr0, enc_picc, 16, plain, 0) != 0)
+        return NCI_E_AUTH;
+    memcpy(out->uid, plain + 1, 7);
+    out->read_ctr = (uint32_t)plain[8] | ((uint32_t)plain[9] << 8) |
+                    ((uint32_t)plain[10] << 16);
+
+    /* Session MAC key: SesSDMFileReadMACKey = LRP-CMAC(KSDMFileRead, SV), with
+     * SV = 3C C3 00 01 00 80 || UID || SDMReadCtr (one 16-byte block). */
+    uint8_t sv[16];
+    sv[0] = 0x3C; sv[1] = 0xC3; sv[2] = 0x00; sv[3] = 0x01; sv[4] = 0x00; sv[5] = 0x80;
+    memcpy(sv + 6, out->uid, 7);
+    sv[13] = (uint8_t)(out->read_ctr & 0xFF);
+    sv[14] = (uint8_t)((out->read_ctr >> 8) & 0xFF);
+    sv[15] = (uint8_t)((out->read_ctr >> 16) & 0xFF);
+
+    lrp_ctx file_ctx;
+    lrp_init(&file_ctx, file_key);
+    uint8_t ses_mac[16];
+    lrp_cmac(&file_ctx, sv, sizeof sv, ses_mac);
+
+    /* SDMMAC = odd-byte truncation of LRP-CMAC(SesSDMFileReadMACKey, mac_input),
+     * same truncation (bytes 1,3,..,15) as the AES-mode SDMMAC. */
+    lrp_ctx ses_ctx;
+    lrp_init(&ses_ctx, ses_mac);
+    uint8_t full[16], mac[8];
+    lrp_cmac(&ses_ctx, mac_input, mac_input_len, full);
+    for (int i = 0; i < 8; i++) mac[i] = full[2 * i + 1];
+
+    out->mac_valid = (memcmp(mac, cmac, 8) == 0);
+    /* DEFERRED: LRP SDMENCFileData decryption not implemented; file_data_len=0. */
     return out->mac_valid ? NCI_OK : NCI_E_AUTH;
 }
 

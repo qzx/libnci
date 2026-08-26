@@ -13,6 +13,7 @@
 
 #include "apdu.h"
 #include "desfire_ev2.h"
+#include "nci/desfire.h"   /* nci_desfire_df_name */
 
 /* ---- pure parameter serialisers (exposed for tests) ------------------- */
 
@@ -68,7 +69,10 @@ int desfire_ev3_create_backup_data_file(apdu_fn fn, void *ctx,
                                         desfire_ev2_session *s, uint8_t file_no,
                                         int iso_file_id, uint8_t comm,
                                         uint16_t access, uint32_t size);
-int desfire_ev3_commit_transaction(apdu_fn fn, void *ctx, desfire_ev2_session *s);
+/* option 0x01 requests TMC/TMV (required on a TMAC-enabled app); 0x00 is the
+ * plain commit for apps with no TransactionMAC file. tmc/tmv may be NULL. */
+int desfire_ev3_commit_transaction(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                   uint8_t option, uint32_t *tmc, uint8_t tmv[8]);
 int desfire_ev3_abort_transaction(apdu_fn fn, void *ctx, desfire_ev2_session *s);
 
 /* ---- queries (impl.txt #93-95) ---------------------------------------- */
@@ -79,13 +83,24 @@ int desfire_ev3_get_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
 int desfire_ev3_change_key_settings(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                     uint8_t new_settings);
 
+/* ---- key-set management + GetDFNames (P2) ----------------------------- */
+int desfire_ev3_initialize_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                   uint8_t key_set_no, uint8_t key_set_type);
+int desfire_ev3_finalize_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                                 uint8_t key_set_no, uint8_t key_set_version);
+int desfire_ev3_roll_key_set(apdu_fn fn, void *ctx, desfire_ev2_session *s,
+                             uint8_t key_set_no);
+/* GetDFNames is session-less (PICC level): no desfire_ev2_session. */
+int desfire_ev3_get_df_names(apdu_fn fn, void *ctx, nci_desfire_df_name *out,
+                             size_t cap, size_t *count);
+
 /* ---- Transaction MAC (impl.txt #97-99) -------------------------------- */
 int desfire_ev3_create_transaction_mac_file(apdu_fn fn, void *ctx,
         desfire_ev2_session *s, uint8_t file_no, uint8_t comm_settings,
         uint16_t access_rights, const uint8_t tmac_key[16], uint8_t key_version);
 int desfire_ev3_commit_reader_id(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                  const uint8_t reader_id[16],
-                                 uint8_t *enc_tmri, size_t cap, size_t *out_len);
+                                 uint8_t *tmri, size_t cap, size_t *out_len);
 int desfire_ev3_read_transaction_mac(apdu_fn fn, void *ctx, desfire_ev2_session *s,
                                      uint8_t comm, uint8_t file_no,
                                      uint32_t *tmac_counter, uint8_t tmv[8]);
