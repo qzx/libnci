@@ -34,6 +34,23 @@ int crypto_aes_ecb_decrypt(const uint8_t key[AES_KEY_LEN],
 int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
                     const uint8_t *data, size_t len, uint8_t out[AES_BLOCK]);
 
+/* HMAC-SHA256 (RFC 2104 / FIPS 180-4) over the concatenation a||b, keyed by
+ * `key`. Either message part may be empty (NULL with a 0 length); splitting the
+ * message in two lets a caller feed e.g. uid||seed without a scratch buffer.
+ * Writes the full 32-byte tag. This is the ONE HMAC-SHA256 primitive the whole
+ * stack derives keys through - implemented on OpenSSL (host) and mbedTLS
+ * (ESP32) so kdf.c stays backend-agnostic. Returns 0 on success, <0 on error. */
+int crypto_hmac_sha256(const uint8_t *key, size_t key_len,
+                       const uint8_t *a, size_t alen,
+                       const uint8_t *b, size_t blen, uint8_t out[32]);
+
+/* TDEA (Triple-DES) CMAC per NIST SP 800-38B, 8-byte block => 8-byte tag.
+ * keylen selects the cipher: 16 = 2-key EDE2, 24 = 3-key EDE3 (the two variants
+ * AN10922 uses). Returns 0 on success, <0 on error (including a build whose
+ * backend has DES compiled out). */
+int crypto_tdea_cmac(const uint8_t *key, size_t keylen,
+                     const uint8_t *data, size_t len, uint8_t out[8]);
+
 /* (2K/3K)3DES-CBC, no padding. DES_BLOCK (8) aligned, IV not modified, out may
  * alias in. keylen selects the cipher: 8 = single DES (expanded to EDE K||K),
  * 16 = 2-key 3DES (EDE2), 24 = 3-key 3DES (EDE3). `enc` selects direction.

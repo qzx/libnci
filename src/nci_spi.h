@@ -29,12 +29,21 @@ typedef struct nci_spi nci_spi;   /* opaque */
 nci_spi *nci_spi_open(const char *dev, uint32_t speed_hz, uint8_t mode);
 void        nci_spi_close(nci_spi *s);
 
-/* One SPI transfer each, mirroring the i2c.c read/write shape.
- *   write : clocks out `buf` (MOSI), MISO discarded.
- *   read  : clocks `len` dummy bytes out, capturing MISO into `buf`.
+/* The PN7160 SPI Transfer-Direction Detector byte (0x7F write / 0xFF read) is handled
+ * internally, so callers pass only the NCI bytes:
+ *   write : prepend 0x7F and clock `buf` in one CS window, inspecting the MISO byte the NFCC
+ *           returns against the 0x7F byte. 0xFF => NFCC ready and the command was accepted;
+ *           otherwise it was in standby/busy - back off and resend (the vendor handshake).
+ *           Returns len when accepted, or <0 if still not ready after a few tries (the NCI
+ *           command() layer then resends at its own cadence).
+ *   read  : read EXACTLY one NCI packet - header(3) + payload(header[2]) - in one held-CS
+ *           window (0xFF direction byte, readiness-gate on the echo, then the exact packet,
+ *           no over-clocking past it). `cap` is the destination buffer size. Returns the
+ *           packet length (3 + payload), or 0 when the NFCC is not ready / the line is idle
+ *           (caller resends).
  * Return bytes transferred, or <0 on error. */
 int nci_spi_write(nci_spi *s, const uint8_t *buf, size_t len);
-int nci_spi_read (nci_spi *s, uint8_t *buf, size_t len);
+int nci_spi_read (nci_spi *s, uint8_t *buf, size_t cap);
 
 /* Used when cfg->spi_speed_hz is left 0. 1 MHz is safe for every PN7160 wiring;
  * production can raise it via nci_config.spi_speed_hz. */

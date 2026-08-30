@@ -24,7 +24,7 @@
 #include "transport.h"
 #include "gpio.h"
 #include "i2c.h"
-#include "spi.h"
+#include "nci_spi.h"
 #include "log.h"
 #include "nci/nci.h"   /* NCI_OK / nci_status codes for the DWL entry points */
 
@@ -78,17 +78,30 @@ static void msleep(unsigned int ms)
 #endif
 }
 
+static int drain_pending(transport_impl *t);   /* fwd: used by the SPI standby wake below */
+
+/* Is this the start of a real received packet (RSP 0x4x / NTF 0x6x, MT bit7 clear) rather
+ * than an idle line (0xFF, bit7 set)? */
+static inline int looks_like_pkt(uint8_t b0) { return (b0 & 0x80) == 0; }
+
 /* ---- vtable: reset ------------------------------------------------ */
 static int t_reset(void *ctx, bool fw_download)
 {
     transport_impl *t = ctx;
     LOGD("reset: fw_download=%d", fw_download);
     nci_gpio_set_dwl(t->gpio, fw_download);
-    msleep(t->settle_ms);
-    nci_gpio_set_ven(t->gpio, false);   /* power off / assert reset */
-    msleep(t->settle_ms);
-    nci_gpio_set_ven(t->gpio, true);    /* release reset -> boot    */
-    msleep(t->settle_ms * 2);              /* let the bootloader settle */
+    /* Power-down reset matching the empirically-proven qzx_spi_bringup sequence for this board:
+     * drive VEN LOW long enough to fully power the NFCC down, then HIGH to boot. The controller
+     * resets on the LOW *level* (a power-down), not an edge - so a long low is the software
+     * equivalent of a power cycle and is what recovers a wedged controller; no leading HIGH pulse
+     * is needed. (Proven: VEN LOW 300 ms -> HIGH 150 ms. The vendor uses the same low->high, just
+     * a shorter hold.) */
+    nci_gpio_set_ven(t->gpio, false);   /* VEN LOW: power down / reset */
+    { unsigned int low = t->settle_ms; msleep(low < 300 ? 300 : low); }
+    nci_gpio_set_ven(t->gpio, true);    /* VEN HIGH: boot */
+    /* Let the firmware boot before ANY bus activity. The NFCC then sits in standby; the wake
+     * (first write NAK'd, resend to land) is handled per-command in the NCI command() retry. */
+    { unsigned int boot = t->settle_ms; msleep(boot < 150 ? 150 : boot); }
     return 0;
 }
 
@@ -98,6 +111,13 @@ static int t_reset(void *ctx, bool fw_download)
 static int drain_pending(transport_impl *t)
 {
     uint8_t buf[NCI_HEADER_LEN + 255];
+    if (t->bus_type == NCI_BUS_SPI) {
+        /* nci_spi_read returns one exact-length packet (header + payload) per call. */
+        int n = bus_read(t, buf, sizeof buf);
+        if (n < NCI_HEADER_LEN || !looks_like_pkt(buf[0])) return 0;
+        nci_log_hex("DRAIN", buf, n);
+        return n;
+    }
     int n = bus_read(t, buf, NCI_HEADER_LEN);
     if (n != NCI_HEADER_LEN) return n;
     size_t payload = buf[NCI_LEN_OFFSET];
@@ -134,34 +154,43 @@ static int t_read(void *ctx, uint8_t *buf, size_t cap, int timeout_ms)
     transport_impl *t = ctx;
     if (cap < NCI_HEADER_LEN) return -1;
 
-    int irq = nci_gpio_wait_irq(t->gpio, timeout_ms);
-    if (irq == 0) return 0;            /* timeout: no data pending */
-    if (irq == NCI_GPIO_ABORTED) return NCI_TRANSPORT_ABORTED;
-    if (irq < 0)  return -1;
-
-    /* Header: MT/PBF/GID, OID, payload length. */
-    int n = bus_read(t, buf, NCI_HEADER_LEN);
-    if (n != NCI_HEADER_LEN) {
-        LOGE("transport: header read %d", n);
-        return -1;
-    }
-    size_t payload = buf[NCI_LEN_OFFSET];
-    if (NCI_HEADER_LEN + payload > cap) {
-        LOGE("transport: packet len %zu exceeds buffer %zu",
-             NCI_HEADER_LEN + payload, cap);
-        return -1;
-    }
-    if (payload > 0) {
-        /* IRQ stays asserted until the whole packet is drained, so the
-         * payload is already available - no second edge to wait for. */
-        n = bus_read(t, buf + NCI_HEADER_LEN, payload);
-        if (n != (int)payload) {
-            LOGE("transport: payload read %d/%zu", n, payload);
-            return -1;
+    if (t->bus_type == NCI_BUS_SPI) {
+        /* Poll IRQ + read across the WHOLE timeout, exactly like the vendor's getMessage loop:
+         * while not timed out, if IRQ says a packet is staged, read one; keep going on an idle/
+         * not-ready read. This tolerates a packet that arrives late (e.g. the CORE_RESET_NTF a
+         * few ms after the RSP) instead of giving up after a fixed number of tries. */
+        for (int ms = 0; ms < timeout_ms; ms++) {
+            int irq = nci_gpio_wait_irq(t->gpio, 1);      /* ~1 ms poll step */
+            if (irq == NCI_GPIO_ABORTED) return NCI_TRANSPORT_ABORTED;
+            if (irq == 1) {
+                int n = bus_read(t, buf, cap);            /* one exact-length packet, or 0 if idle */
+                if (n >= NCI_HEADER_LEN && looks_like_pkt(buf[0])) {
+                    nci_log_hex("RECV", buf, n);
+                    return n;
+                }
+                if (n < 0) return -1;
+            }
         }
+        return 0;                                         /* nothing within the window: caller resends */
     }
-    nci_log_hex("RECV", buf, NCI_HEADER_LEN + payload);
-    return (int)(NCI_HEADER_LEN + payload);
+
+    /* I2C: wait IRQ, then header + payload (IRQ stays asserted until the packet is drained). */
+    int irq = nci_gpio_wait_irq(t->gpio, timeout_ms);
+    if (irq == 0) return 0;
+    if (irq == NCI_GPIO_ABORTED) return NCI_TRANSPORT_ABORTED;
+    if (irq < 0) return -1;
+
+    int n = bus_read(t, buf, NCI_HEADER_LEN);
+    if (n != NCI_HEADER_LEN) { LOGE("transport: header read %d", n); return -1; }
+    size_t payload = buf[NCI_LEN_OFFSET];
+    size_t total = NCI_HEADER_LEN + payload;
+    if (total > cap) { LOGE("transport: packet len %zu exceeds buffer %zu", total, cap); return -1; }
+    if (payload > 0) {
+        n = bus_read(t, buf + NCI_HEADER_LEN, payload);
+        if (n != (int)payload) { LOGE("transport: payload read %d/%zu", n, payload); return -1; }
+    }
+    nci_log_hex("RECV", buf, total);
+    return (int)total;
 }
 
 /* ---- vtable: abort ----------------------------------------------- */

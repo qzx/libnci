@@ -428,3 +428,116 @@ int nci_snep_get(nci *d, const uint8_t *req_ndef, size_t req_len,
     return nci_snep_get_link(link_over_raw, d, req_ndef, req_len,
                              out, cap, out_len);
 }
+
+/* ====================================================================== *
+ *  Target-side SNEP PUT server (nci_snep_serve)                           *
+ * ====================================================================== *
+ * The NFC-DEP target is the LLCP responder: it receives the initiator's PDU,
+ * then replies (never transmits first). This drives the same llcp.c/snep.c
+ * codecs as the client, but as a server for the SNEP default service. */
+int nci_snep_serve(nci *d, uint8_t *out, size_t cap, size_t *out_len,
+                   int timeout_ms)
+{
+    if (!d || !out || cap < NCI_SNEP_HDR_LEN) return NCI_E_INVAL;
+    if (nci_rf_interface_of(d) != NCI_RF_NFCDEP) {
+        LOGW("snep: serve with no activated NFC-DEP link");
+        return NCI_E_NOTSUP;
+    }
+    if (out_len) *out_len = 0;
+
+    nci_llcp_conn c;
+    memset(&c, 0, sizeof c);
+    bool     connected = false, have_hdr = false, put_done = false;
+    size_t   collected = 0;          /* SNEP message bytes gathered (header+ndef) */
+    uint32_t declared  = 0;          /* NCI_SNEP_HDR_LEN + SNEP length, once seen  */
+    uint8_t  field     = 0;          /* SNEP request field (PUT/GET)               */
+
+    uint8_t rx[256];
+    uint8_t tx[3 + SNEP_TX_MIU + 8];
+    int     budget = timeout_ms > 0 ? timeout_ms : 10000;
+
+    for (int guard = 0; guard < 512 && budget > 0; guard++) {
+        int slice = budget < 800 ? budget : 800;
+        int n = nci_recv_raw(d, rx, sizeof rx, slice);
+        if (n < 0) return put_done ? NCI_OK : NCI_E_TAG_GONE;  /* link dropped   */
+        if (n == 0) { budget -= slice; continue; }             /* idle slice     */
+
+        nci_llcp_pdu pdu;
+        int m = -1;
+        if (nci_llcp_pdu_decode(rx, (size_t)n, &pdu) < 0) {
+            m = nci_llcp_send_symm(tx, sizeof tx);             /* junk: keepalive */
+        } else if (pdu.ptype == NCI_LLCP_SYMM) {
+            m = nci_llcp_send_symm(tx, sizeof tx);
+        } else if (pdu.ptype == NCI_LLCP_CONNECT) {
+            bool is_snep = (pdu.dsap == NCI_LLCP_SAP_SNEP);
+            if (!is_snep) {
+                const uint8_t *sn; uint8_t snl;
+                if (nci_llcp_tlv_find(pdu.info, pdu.info_len, NCI_LLCP_TLV_SN,
+                                      &sn, &snl) == NCI_OK
+                    && snl == strlen(NCI_SNEP_SERVICE_NAME)
+                    && memcmp(sn, NCI_SNEP_SERVICE_NAME, snl) == 0)
+                    is_snep = true;
+            }
+            if (is_snep) {
+                nci_llcp_conn_init(&c, NCI_LLCP_SAP_SNEP, pdu.ssap);
+                c.state = NCI_LLCP_S_CONNECTED;
+                const uint8_t *mv; uint8_t ml;
+                if (nci_llcp_tlv_find(pdu.info, pdu.info_len, NCI_LLCP_TLV_MIUX,
+                                      &mv, &ml) == NCI_OK && ml == 2)
+                    c.remote_miu = (uint16_t)(NCI_LLCP_MIU_DEFAULT
+                                              + (((mv[0] & 0x07) << 8) | mv[1]));
+                connected = true; collected = 0; have_hdr = false;
+                m = nci_llcp_build_cc(pdu.ssap, NCI_LLCP_SAP_SNEP,
+                                      NCI_LLCP_MIU_DEFAULT, 1, tx, sizeof tx);
+            } else {
+                m = nci_llcp_build_dm(pdu.ssap, pdu.dsap,
+                                      NCI_LLCP_DM_NO_SERVICE, tx, sizeof tx);
+            }
+        } else if (pdu.ptype == NCI_LLCP_I && connected) {
+            nci_llcp_event ev;
+            if (nci_llcp_recv(&c, rx, (size_t)n, &ev) == NCI_OK
+                && ev.kind == NCI_LLCP_EV_DATA) {
+                if (collected + ev.data_len <= cap) {
+                    memcpy(out + collected, ev.data, ev.data_len);
+                    collected += ev.data_len;
+                }
+                if (!have_hdr && collected >= NCI_SNEP_HDR_LEN) {
+                    nci_snep_header sh;
+                    if (nci_snep_decode(out, collected, &sh, NULL, NULL) == NCI_OK) {
+                        have_hdr = true; field = sh.field;
+                        declared = (uint32_t)NCI_SNEP_HDR_LEN + sh.length;
+                    }
+                }
+                uint8_t resp[NCI_SNEP_HDR_LEN];
+                if (have_hdr && field == NCI_SNEP_REQ_GET) {
+                    int rl = nci_snep_encode_response(NCI_SNEP_RSP_NOT_IMPLEMENTED,
+                                                      NULL, 0, resp, sizeof resp);
+                    m = nci_llcp_send_i(&c, resp, (size_t)rl, tx, sizeof tx);
+                } else if (have_hdr && collected >= declared) {
+                    size_t ndef_len = collected - NCI_SNEP_HDR_LEN;
+                    memmove(out, out + NCI_SNEP_HDR_LEN, ndef_len);
+                    if (out_len) *out_len = ndef_len;
+                    put_done = true;
+                    int rl = nci_snep_encode_response(NCI_SNEP_RSP_SUCCESS,
+                                                      NULL, 0, resp, sizeof resp);
+                    m = nci_llcp_send_i(&c, resp, (size_t)rl, tx, sizeof tx);
+                } else {
+                    m = nci_llcp_send_rr(&c, tx, sizeof tx);   /* ack; more coming */
+                }
+            } else {
+                m = nci_llcp_send_rr(&c, tx, sizeof tx);
+            }
+        } else if (pdu.ptype == NCI_LLCP_DISC) {
+            m = nci_llcp_build_dm(pdu.ssap, pdu.dsap, NCI_LLCP_DM_NORMAL, tx, sizeof tx);
+            if (m >= 0) (void)nci_send_raw(d, tx, (size_t)m);
+            return put_done ? NCI_OK : NCI_E_PROTO;
+        } else {
+            m = nci_llcp_send_symm(tx, sizeof tx);
+        }
+
+        if (m < 0) return put_done ? NCI_OK : NCI_E_PROTO;
+        if (nci_send_raw(d, tx, (size_t)m) < 0)
+            return put_done ? NCI_OK : NCI_E_TAG_GONE;
+    }
+    return put_done ? NCI_OK : NCI_TIMEOUT;
+}

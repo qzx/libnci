@@ -21,6 +21,7 @@
 #include <string.h>
 #include "esp_random.h"   /* esp_random() - ESP-IDF hardware RNG (arduino-esp32 >= 3.0) */
 #include "mbedtls/aes.h"
+#include "mbedtls/md.h"   /* mbedtls_md_hmac* (MBEDTLS_MD_C + SHA256, on by default) */
 #if defined(__has_include)
 #  if __has_include("mbedtls/des.h")
 #    include "mbedtls/des.h"
@@ -126,6 +127,90 @@ int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
     }
     for (int j = 0; j < 16; j++) M[j] = (uint8_t)(X[j] ^ last[j]);
     return crypto_aes_ecb_encrypt(key, M, out);
+}
+
+/* ---- HMAC-SHA256 (mbedTLS md-HMAC) ------------------------------------ *
+ * Two-part message (a||b) so the derivation callers feed uid||seed without a
+ * scratch concat. Byte-identical to the OpenSSL host backend (RFC 4231 KAT in
+ * tests/test_kdf.c pins both). */
+int crypto_hmac_sha256(const uint8_t *key, size_t key_len,
+                       const uint8_t *a, size_t alen,
+                       const uint8_t *b, size_t blen, uint8_t out[32])
+{
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!info) return -1;
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    int rc = mbedtls_md_setup(&ctx, info, 1 /* HMAC */);
+    if (rc == 0) rc = mbedtls_md_hmac_starts(&ctx, key, key_len);
+    if (rc == 0 && alen) rc = mbedtls_md_hmac_update(&ctx, a, alen);
+    if (rc == 0 && blen) rc = mbedtls_md_hmac_update(&ctx, b, blen);
+    if (rc == 0) rc = mbedtls_md_hmac_finish(&ctx, out);
+    mbedtls_md_free(&ctx);
+    return rc == 0 ? 0 : -1;
+}
+
+/* ---- TDEA-CMAC (SP 800-38B, 64-bit block) ----------------------------- *
+ * Built directly on the 3DES single-block encrypt (crypto_3des_cbc with a zero
+ * IV over one 8-byte block == 3DES-ECB of that block), so it needs neither
+ * MBEDTLS_CMAC_C nor a DES-CMAC in the core's mbedTLS - only MBEDTLS_DES_C,
+ * which crypto_3des_cbc already requires. Same OMAC1 logic as the AES-CMAC
+ * above but over an 8-byte block (Rb = 0x1B). If DES is compiled out,
+ * crypto_3des_cbc returns -1 and so do we (legacy AN10922 3DES diversification
+ * is then unavailable; the AES-128 path and node-key HMAC are unaffected). */
+
+/* GF(2^64) doubling: out = (in << 1), XOR 0x1B if the high bit was set. */
+static void cmac_dbl8(const uint8_t in[8], uint8_t out[8])
+{
+    uint8_t carry = (uint8_t)(in[0] & 0x80);
+    for (int i = 0; i < 7; i++)
+        out[i] = (uint8_t)((in[i] << 1) | (in[i + 1] >> 7));
+    out[7] = (uint8_t)(in[7] << 1);
+    if (carry) out[7] ^= 0x1B;
+}
+
+/* 3DES single-block encrypt (ECB) via CBC with a zero IV. */
+static int des_ecb_enc(const uint8_t *key, size_t keylen,
+                       const uint8_t in[8], uint8_t out[8])
+{
+    static const uint8_t zero_iv[8] = {0};
+    return crypto_3des_cbc(key, keylen, zero_iv, in, 8, out, 1);
+}
+
+int crypto_tdea_cmac(const uint8_t *key, size_t keylen,
+                     const uint8_t *data, size_t len, uint8_t out[8])
+{
+    if (keylen != 16 && keylen != 24) return -1;
+
+    uint8_t L[8], K1[8], K2[8], zero[8] = {0};
+    if (des_ecb_enc(key, keylen, zero, L) != 0) return -1;   /* -1 if DES absent */
+    cmac_dbl8(L, K1);
+    cmac_dbl8(K1, K2);
+
+    size_t nblocks = (len + 7) / 8;
+    int complete = (len != 0 && len % 8 == 0);
+    if (nblocks == 0) nblocks = 1;
+
+    uint8_t X[8] = {0}, M[8];
+    for (size_t i = 0; i + 1 < nblocks; i++) {
+        for (int j = 0; j < 8; j++) M[j] = (uint8_t)(X[j] ^ data[i * 8 + j]);
+        if (des_ecb_enc(key, keylen, M, X) != 0) return -1;
+    }
+
+    size_t off = (nblocks - 1) * 8;
+    size_t rem = len - off;
+    uint8_t last[8];
+    if (complete) {
+        memcpy(last, data + off, 8);
+        for (int j = 0; j < 8; j++) last[j] ^= K1[j];
+    } else {
+        memset(last, 0, 8);
+        if (rem) memcpy(last, data + off, rem);
+        last[rem] = 0x80;
+        for (int j = 0; j < 8; j++) last[j] ^= K2[j];
+    }
+    for (int j = 0; j < 8; j++) M[j] = (uint8_t)(X[j] ^ last[j]);
+    return des_ecb_enc(key, keylen, M, out);
 }
 
 /* ---- (2K/3K)3DES-CBC (mbedTLS DES, if compiled in) -------------------- */

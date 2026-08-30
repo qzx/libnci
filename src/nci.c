@@ -65,34 +65,48 @@ static int command(nci_transport *t,
                    const uint8_t *cmd, size_t cmd_len,
                    uint8_t *rsp, size_t rsp_cap, size_t *rsp_len)
 {
-    if (t->write(t->ctx, cmd, cmd_len) < 0) {
-        LOGE("nci: write failed for cmd %02x%02x", cmd[0], cmd[1]);
-        return NCI_E_IO;
+    /* The NFCC returns to standby when idle; the first write after that wakes it but is itself
+     * dropped, so no response/IRQ arrives. Resend the command if nothing answers, allowing for
+     * the ~100-150 ms standby-wake latency per attempt. Resending the same command is safe: a
+     * control command that did not execute has no side effect.
+     *
+     * On SPI the standby NFCC does not silently accept-and-drop the write; it NAKs it (the write
+     * ready-handshake fails), so t->write() returns < 0. That is NOT fatal - the write itself
+     * nudges the controller awake, so a resend on the next pass lands. Back off into the next
+     * wake attempt rather than aborting. But a write that NEVER once succeeds across all attempts
+     * is a genuine transport fault (dead bus / no controller), which stays NCI_E_IO. */
+    bool wrote = false;
+    for (int wake = 0; wake < 8; wake++) {
+        if (t->write(t->ctx, cmd, cmd_len) < 0) {
+            LOGD("nci: write NAK for cmd %02x%02x (standby/busy) - resending", cmd[0], cmd[1]);
+            continue;
+        }
+        wrote = true;
+        for (int tries = 0; tries < 8; tries++) {
+            int n = t->read(t->ctx, rsp, rsp_cap, 250);
+            if (n == 0) break;              /* no packet within the wake window: resend */
+            if (n < 0) {
+                LOGE("nci: I/O error awaiting rsp to cmd %02x%02x", cmd[0], cmd[1]);
+                return NCI_E_IO;
+            }
+            if (n < HDR_LEN) {
+                LOGE("nci: runt response (%d B) to cmd %02x%02x", n, cmd[0], cmd[1]);
+                return NCI_E_PROTO;
+            }
+            if (mt(rsp) == MT_RSP && gid(rsp) == gid(cmd) && oid(rsp) == oid(cmd)) {
+                /* First payload byte is the NCI status for status-bearing RSPs
+                 * (impl.txt #128); surface it to the device layer. */
+                t->last_nci_status = (n > HDR_LEN) ? rsp[HDR_LEN] : 0x00;
+                if (rsp_len) *rsp_len = (size_t)n;
+                return NCI_OK;
+            }
+            /* Notification arriving before the RSP (e.g. CORE_RESET_NTF). Skip. */
+            LOGD("nci: skipping unsolicited %02x%02x while awaiting rsp", rsp[0], rsp[1]);
+        }
     }
-
-    for (int tries = 0; tries < 8; tries++) {
-        int n = t->read(t->ctx, rsp, rsp_cap, 1000);
-        if (n == 0) {
-            LOGE("nci: timeout awaiting rsp to cmd %02x%02x", cmd[0], cmd[1]);
-            return NCI_E_TIMEOUT;
-        }
-        if (n < 0) {
-            LOGE("nci: I/O error awaiting rsp to cmd %02x%02x", cmd[0], cmd[1]);
-            return NCI_E_IO;
-        }
-        if (n < HDR_LEN) {
-            LOGE("nci: runt response (%d B) to cmd %02x%02x", n, cmd[0], cmd[1]);
-            return NCI_E_PROTO;
-        }
-        if (mt(rsp) == MT_RSP && gid(rsp) == gid(cmd) && oid(rsp) == oid(cmd)) {
-            /* First payload byte is the NCI status for status-bearing RSPs
-             * (impl.txt #128); surface it to the device layer. */
-            t->last_nci_status = (n > HDR_LEN) ? rsp[HDR_LEN] : 0x00;
-            if (rsp_len) *rsp_len = (size_t)n;
-            return NCI_OK;
-        }
-        /* Notification arriving before the RSP (e.g. CORE_RESET_NTF). Skip. */
-        LOGD("nci: skipping unsolicited %02x%02x while awaiting rsp", rsp[0], rsp[1]);
+    if (!wrote) {
+        LOGE("nci: write never accepted for cmd %02x%02x (transport fault)", cmd[0], cmd[1]);
+        return NCI_E_IO;
     }
     LOGE("nci: gave up waiting for rsp to %02x%02x", cmd[0], cmd[1]);
     return NCI_E_TIMEOUT;
@@ -107,10 +121,13 @@ static int drain_one(nci_transport *t, uint8_t *buf, size_t cap)
 }
 
 /* ---- CORE_RESET -------------------------------------------------- */
-int nci_core_reset(nci_transport *t, nci_dev_info *info)
+int nci_core_reset(nci_transport *t, nci_dev_info *info, uint8_t reset_type)
 {
-    /* Reset, keeping configuration (param 0x00). */
-    static const uint8_t cmd[] = { 0x20, 0x00, 0x01, 0x00 };
+    /* reset_type 0x01 = reset configuration to defaults (clean first bring-up: the reference
+     * PN7160/PN7161 SPI drivers - MikroE nfc7spi, elechouse - all use 0x01 at connect).
+     * reset_type 0x00 = keep configuration (used to APPLY a just-written CORE_SET_CONFIG
+     * without reverting it - UM11495 §13). */
+    const uint8_t cmd[] = { 0x20, 0x00, 0x01, reset_type };
     uint8_t rsp[MAX_PKT];
     size_t  rlen = 0;
 
@@ -263,7 +280,7 @@ int nci_rf_discover_map(nci_transport *t)
         0x21, 0x00, 0x0D, 0x04,
         0x02, 0x01, 0x01,   /* T2T,    poll, Frame                 */
         0x04, 0x01, 0x02,   /* ISODEP, poll, ISO-DEP               */
-        0x05, 0x01, 0x03,   /* NFCDEP, poll, NFC-DEP               */
+        0x05, 0x03, 0x03,   /* NFCDEP, poll|listen, NFC-DEP (P2P: both roles) */
         0x80, 0x01, 0x80,   /* MIFARE, poll, MIFARE Classic iface  */
     };
     uint8_t rsp[MAX_PKT];
@@ -274,6 +291,43 @@ int nci_rf_discover_map(nci_transport *t)
         return NCI_E_STATUS;
     }
     LOGD("nci: RF_DISCOVER_MAP ok");
+    return NCI_OK;
+}
+
+/* Configure the NFC-DEP ATR general bytes so the NFC-DEP link advertises LLCP,
+ * which a peer needs to recognise the P2P/SNEP capability. Standard NCI RF
+ * config params: PN_ATR_REQ_GEN_BYTES (0x29, the initiator's ATR_REQ general
+ * bytes) and LN_ATR_RES_GEN_BYTES (0x61, the target's ATR_RES general bytes).
+ * Both carry the LLCP magic (46 66 6D) + a VERSION 1.1 TLV; the NFCC copies them
+ * into the ATR exchange it runs. Must be sent before discovery starts. */
+int nci_set_p2p_gen_bytes(nci_transport *t)
+{
+    /* LLCP MAGIC 'Ffm' + VERSION 1.1 + WKS 0x0001 (SDP) + LTO 2.5 s. This is the
+     * reference elechouse/NXP ATR general-bytes payload a peer needs to see to
+     * bind the LLCP link and its SNEP service. */
+    static const uint8_t gb[] = { 0x46, 0x66, 0x6D,
+                                  0x01, 0x01, 0x11,          /* VERSION 1.1 */
+                                  0x03, 0x02, 0x00, 0x01,    /* WKS 0x0001  */
+                                  0x04, 0x01, 0xFA };        /* LTO 2.5 s   */
+    uint8_t cmd[3 + 1 + 2 * (2 + sizeof gb)];
+    size_t i = 0;
+    cmd[i++] = 0x20; cmd[i++] = 0x02;                 /* CORE_SET_CONFIG            */
+    size_t lenpos = i++;                              /* payload length (filled in) */
+    cmd[i++] = 0x02;                                  /* 2 config parameters        */
+    cmd[i++] = 0x29; cmd[i++] = (uint8_t)sizeof gb;   /* PN_ATR_REQ_GEN_BYTES       */
+    memcpy(cmd + i, gb, sizeof gb); i += sizeof gb;
+    cmd[i++] = 0x61; cmd[i++] = (uint8_t)sizeof gb;   /* LN_ATR_RES_GEN_BYTES       */
+    memcpy(cmd + i, gb, sizeof gb); i += sizeof gb;
+    cmd[lenpos] = (uint8_t)(i - HDR_LEN);             /* payload after the 3-byte header */
+
+    uint8_t rsp[MAX_PKT];
+    int cr = command(t, cmd, i, rsp, sizeof rsp, NULL);
+    if (cr != NCI_OK) return cr;
+    if (rsp[3] != NCI_STATUS_OK) {
+        LOGW("nci: CORE_SET_CONFIG(LLCP gen bytes) status 0x%02x - P2P may not advertise LLCP", rsp[3]);
+        return NCI_E_STATUS;
+    }
+    LOGD("nci: LLCP ATR general bytes configured (initiator + target)");
     return NCI_OK;
 }
 
@@ -327,6 +381,70 @@ int nci_rf_discover_mask(nci_transport *t, uint32_t tech_mask)
     }
     LOGD("nci: RF_DISCOVER(mask 0x%02x, %u techs) ok", tech_mask, n / 2);
     return NCI_OK;
+}
+
+/* ---- P2P (NFC-DEP) discovery ------------------------------------- *
+ * Arm SYMMETRIC NFC-DEP discovery so two peers auto-negotiate initiator/target:
+ * route the NFC-DEP protocol to the DH in listen mode, advertise NFC-DEP in the
+ * NFC-A listen SEL_RES, then RF_DISCOVER over both poll (NFC-A/F + active) and
+ * listen (NFC-F + active) technologies. Byte sequences are the elechouse/NXP P2P
+ * reference (mode 3). The routing/SEL_INFO writes are non-fatal on rejection
+ * (some firmwares route by default), matching ce_arm's policy. */
+int nci_p2p_discover(nci_transport *t)
+{
+    uint8_t rsp[MAX_PKT];
+    int cr;
+
+    /* Listen-mode routing: NFC-DEP protocol -> DH. */
+    static const uint8_t route[] = { 0x21, 0x01, 0x07, 0x00, 0x01,
+                                     0x01, 0x03, 0x00, 0x01, 0x05 };
+    cr = command(t, route, sizeof route, rsp, sizeof rsp, NULL);
+    if (cr == NCI_OK && rsp[3] != NCI_STATUS_OK)
+        LOGD("nci: P2P SET_LISTEN_ROUTING status 0x%02x (relying on default route)", rsp[3]);
+
+    /* LA_SEL_INFO: advertise NFC-DEP (bit 0x40) in the NFC-A listen SEL_RES. */
+    static const uint8_t sel[] = { 0x20, 0x02, 0x04, 0x01, 0x32, 0x01, 0x40 };
+    cr = command(t, sel, sizeof sel, rsp, sizeof rsp, NULL);
+    if (cr == NCI_OK && rsp[3] != NCI_STATUS_OK)
+        LOGD("nci: P2P LA_SEL_INFO status 0x%02x", rsp[3]);
+
+    /* RF_DISCOVER over poll+listen NFC-DEP technologies. The elechouse set uses
+     * active modes (0x03/0x83/0x85) that some PN7161 configs reject (status
+     * 0x01); fall back through progressively simpler sets to whatever this chip
+     * accepts. Each entry is a (tech&mode, freq=1) pair; tech bytes:
+     *   poll   passive A/F = 0x00/0x02, active A/F = 0x03/0x05
+     *   listen passive A/F = 0x80/0x82, active A/F = 0x83/0x85  */
+    static const uint8_t cand_full[]    = { 0x00,0x02,0x03,0x82,0x83,0x85 }; /* elechouse */
+    static const uint8_t cand_noactl[]  = { 0x00,0x02,0x03,0x82 };           /* drop active listen */
+    static const uint8_t cand_passive[] = { 0x00,0x02,0x80,0x82 };           /* passive poll+listen A/F */
+    static const uint8_t cand_pa_la[]   = { 0x00,0x80 };                     /* passive A only */
+    struct { const uint8_t *techs; uint8_t n; const char *name; } cands[] = {
+        { cand_full,    6, "poll+listen A/F active" },
+        { cand_noactl,  4, "poll A/F+active, listen pF" },
+        { cand_passive, 4, "passive poll+listen A/F" },
+        { cand_pa_la,   2, "passive A poll+listen" },
+    };
+
+    for (size_t ci = 0; ci < sizeof cands / sizeof cands[0]; ci++) {
+        uint8_t cmd[4 + 12];
+        cmd[0] = 0x21; cmd[1] = OID_RF_DISCOVER;
+        cmd[2] = (uint8_t)(1 + 2 * cands[ci].n);
+        cmd[3] = cands[ci].n;
+        for (uint8_t k = 0; k < cands[ci].n; k++) {
+            cmd[4 + 2 * k]     = cands[ci].techs[k];
+            cmd[4 + 2 * k + 1] = 0x01;                 /* freq */
+        }
+        cr = command(t, cmd, (size_t)(4 + 2 * cands[ci].n), rsp, sizeof rsp, NULL);
+        if (cr != NCI_OK) return cr;
+        if (rsp[3] == NCI_STATUS_OK) {
+            LOGD("nci: P2P discovery armed (%s)", cands[ci].name);
+            return NCI_OK;
+        }
+        LOGD("nci: P2P RF_DISCOVER '%s' rejected (0x%02x), trying simpler", cands[ci].name, rsp[3]);
+        /* a rejected discover leaves RFST_IDLE; the next candidate can be sent directly */
+    }
+    LOGE("nci: no P2P RF_DISCOVER tech set accepted");
+    return NCI_E_STATUS;
 }
 
 /* ---- RF_DEACTIVATE ----------------------------------------------- *
@@ -686,27 +804,16 @@ static int await_credit(nci_transport *t, nci_rf_conn *conn, int timeout_ms)
  * than the connection's Max Data Packet Payload Size is segmented into chained
  * NCI Data Packets (PBF set on all but the last) with per-segment credits
  * (impl #1). Returns 1 with *rx_len set, 0 on timeout, <0 on error. */
-int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
-                  const uint8_t *tx, size_t tx_len,
-                  uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
+/* TX half: send one logical payload as one or more chained NCI Data Packets
+ * (impl #1 - PBF set on all but the last, one send credit per segment). Returns
+ * NCI_OK, or NCI_ERR if the tag went away while awaiting a credit. */
+int nci_data_send(nci_transport *t, nci_rf_conn *conn,
+                  const uint8_t *tx, size_t tx_len)
 {
-    if (!conn || !conn->activated) {
-        LOGE("nci: data exchange with no active tag");
-        return NCI_ERR;
-    }
-    if (tx_len == 0) {
-        LOGE("nci: empty tx payload");
-        return NCI_ERR;
-    }
+    if (!conn || !conn->activated) { LOGE("nci: data send with no active link"); return NCI_ERR; }
+    if (tx_len == 0)               { LOGE("nci: empty tx payload"); return NCI_ERR; }
     uint8_t maxpl = conn->max_payload ? conn->max_payload : 255;
 
-    /* TX-side NCI data chaining (impl #1): a payload larger than the negotiated
-     * Max Data Packet Payload Size is split across several NCI Data Packets, with
-     * the packet-boundary flag (PBF) set on every segment except the last and a
-     * send credit consumed per segment. A payload that fits one packet runs this
-     * loop exactly once (PBF clear), identical to the old single-frame path -
-     * lifting the former ~255 B command ceiling. */
-    uint8_t buf[MAX_PKT];
     uint8_t pkt[3 + 255];
     for (size_t sent = 0; sent < tx_len; ) {
         size_t chunk = tx_len - sent;
@@ -714,23 +821,32 @@ int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
         bool last = (sent + chunk >= tx_len);
 
         if (conn->credits <= 0 && await_credit(t, conn, 200) != NCI_OK)
-            return NCI_ERR;                    /* tag removed while awaiting credit */
+            return NCI_ERR;
 
         pkt[0] = (uint8_t)(MT_DATA | CONN_ID_STATIC_RF | (last ? 0 : PBF_MASK));
-        pkt[1] = 0x00;                         /* RFU */
+        pkt[1] = 0x00;
         pkt[2] = (uint8_t)chunk;
         memcpy(pkt + 3, tx + sent, chunk);
         if (t->write(t->ctx, pkt, 3 + chunk) < 0) return NCI_ERR;
         if (conn->credits > 0) conn->credits--;
         sent += chunk;
     }
+    return NCI_OK;
+}
 
-    /* Collect the response, reassembling NCI-level chained data packets. */
+/* RX half: collect one logical payload, reassembling chained NCI Data Packets
+ * and absorbing credit NTFs. Returns 1 with *rx_len set, 0 on timeout, <0 on
+ * error / link drop (sets conn->activated=false on RF_DEACTIVATE_NTF). */
+int nci_data_recv(nci_transport *t, nci_rf_conn *conn,
+                  uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
+{
+    if (!conn) return NCI_ERR;
+    uint8_t buf[MAX_PKT];
     size_t total = 0;
     int to = timeout_ms;
     for (int guard = 0; guard < 64; guard++) {
         int n = t->read(t->ctx, buf, sizeof buf, to);
-        if (n == 0) { LOGE("nci: transceive timeout"); return NCI_TIMEOUT; }
+        if (n == 0) return NCI_TIMEOUT;
         if (n < HDR_LEN) return NCI_ERR;
 
         if (mt(buf) == MT_DATA) {
@@ -741,34 +857,36 @@ int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
             }
             memcpy(rx + total, buf + HDR_LEN, plen);
             total += plen;
-            if (!(buf[0] & PBF_MASK)) {     /* last segment */
-                if (rx_len) *rx_len = total;
-                return 1;                    /* success (not NCI_OK: that
-                                              * equals NCI_TIMEOUT == 0) */
-            }
-            continue;                        /* more segments follow */
-        }
-        if (mt(buf) == MT_NTF && gid(buf) == GID_CORE &&
-            oid(buf) == OID_CORE_CONN_CREDITS) {
-            absorb_credits(conn, buf, n);
+            if (!(buf[0] & PBF_MASK)) { if (rx_len) *rx_len = total; return 1; }
             continue;
         }
+        if (mt(buf) == MT_NTF && gid(buf) == GID_CORE &&
+            oid(buf) == OID_CORE_CONN_CREDITS) { absorb_credits(conn, buf, n); continue; }
         if (mt(buf) == MT_NTF && gid(buf) == GID_RF &&
             oid(buf) == OID_RF_DEACTIVATE_NTF) {
-            LOGE("nci: tag deactivated during transceive (removed?)");
+            LOGE("nci: link deactivated during data recv");
             conn->activated = false;
             return NCI_ERR;
         }
-        LOGD("nci: ignoring %02x%02x during transceive", buf[0], buf[1]);
-        /* A stray notification (e.g. RF discovery still running after a messy
-         * field restart) must NOT let us wait the full timeout again per packet:
-         * that turns a notification storm into a guard*timeout_ms freeze (a
-         * multi-second wedge seen over the BLE bridge). The real DATA response is
-         * imminent, so cap every wait after the first stray. */
-        if (to > 80) to = 80;
+        LOGD("nci: ignoring %02x%02x during data recv", buf[0], buf[1]);
+        /* Cap re-waits after a stray NTF so an ISO-DEP notification storm can't
+         * wedge us - but NOT for NFC-DEP: a P2P peer's reply (CC / SNEP) can take
+         * far longer than 80 ms (LLCP LTO is up to 2.5 s), so keep the caller's
+         * timeout there. */
+        if (conn->rf_interface != 0x03 && to > 80) to = 80;
     }
     LOGE("nci: too many fragments");
     return NCI_ERR;
+}
+
+/* Initiator round: send then receive one logical exchange on Conn 0. */
+int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
+                  const uint8_t *tx, size_t tx_len,
+                  uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms)
+{
+    int r = nci_data_send(t, conn, tx, tx_len);
+    if (r != NCI_OK) return r;
+    return nci_data_recv(t, conn, rx, rx_cap, rx_len, timeout_ms);
 }
 
 int nci_apdu_xchg(nci_transport *t, nci_rf_conn *conn,

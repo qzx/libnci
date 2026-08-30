@@ -69,13 +69,17 @@ typedef struct {
 } nci_disc_target;
 
 /* Each returns NCI_OK (0) or NCI_ERR (<0). */
-int nci_core_reset(nci_transport *t, nci_dev_info *info);
+int nci_core_reset(nci_transport *t, nci_dev_info *info, uint8_t reset_type);
 int nci_core_init(nci_transport *t, nci_dev_info *info);
 int nci_rf_discover_map(nci_transport *t);
 int nci_rf_discover(nci_transport *t);             /* poll A/B/F/V (all)      */
 
 /* Poll only the technologies in tech_mask (NCI_TECH_* bits). (impl.txt #1) */
 int nci_rf_discover_mask(nci_transport *t, uint32_t tech_mask);
+
+/* Configure the NFC-DEP ATR general bytes to advertise LLCP (for P2P/SNEP).
+ * Send before discovery. Returns NCI_OK, or NCI_E_STATUS if the NFCC rejects it. */
+int nci_set_p2p_gen_bytes(nci_transport *t);
 
 /* RF_DEACTIVATE_CMD with an explicit type (impl.txt #5-6):
  *   0x00 Idle, 0x01 Sleep, 0x02 Sleep_AF, 0x03 Discovery. */
@@ -128,6 +132,18 @@ int nci_apdu_xchg(nci_transport *t, nci_rf_conn *conn,
 int nci_data_xchg(nci_transport *t, nci_rf_conn *conn,
                   const uint8_t *tx, size_t tx_len,
                   uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms);
+
+/* The two halves of nci_data_xchg, exposed for the NFC-DEP target (which must
+ * receive the initiator's PDU before it may reply - it never transmits first).
+ * send returns NCI_OK/<0; recv returns 1 with *rx_len set, 0 timeout, <0 error. */
+int nci_data_send(nci_transport *t, nci_rf_conn *conn,
+                  const uint8_t *tx, size_t tx_len);
+int nci_data_recv(nci_transport *t, nci_rf_conn *conn,
+                  uint8_t *rx, size_t rx_cap, size_t *rx_len, int timeout_ms);
+
+/* Arm symmetric NFC-DEP (P2P) discovery: poll+listen so two peers negotiate
+ * initiator/target roles. Sends listen routing + LA_SEL_INFO + RF_DISCOVER. */
+int nci_p2p_discover(nci_transport *t);
 
 /* Non-destructive ISO-DEP presence check (impl #4). Sends an empty (zero-length)
  * I-block / R(NAK)-style frame on the static RF connection and reads the reply at

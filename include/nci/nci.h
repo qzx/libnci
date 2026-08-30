@@ -373,6 +373,13 @@ int nci_transceive(nci *d, const uint8_t *tx, size_t tx_len,
 int nci_transceive_raw(nci *d, const uint8_t *tx, size_t tx_len,
                        uint8_t *rx, size_t rx_cap, int timeout_ms);
 
+/* Raw Conn-0 halves (send / receive separately) for the NFC-DEP target, which
+ * must receive the initiator's frame before it may reply. Used by the P2P/SNEP
+ * responder (nci_snep_serve). send: NCI_OK or <0. recv: length >=0, 0 on
+ * timeout, <0 on error / link drop. timeout_ms < 0 uses a 1 s default. */
+int nci_send_raw(nci *d, const uint8_t *tx, size_t tx_len);
+int nci_recv_raw(nci *d, uint8_t *rx, size_t rx_cap, int timeout_ms);
+
 /* ---- NFC Forum Type 4 Tag NDEF (impl.txt #24-27) ---------------------- *
  * Operate on the activated ISO-DEP Type 4 tag (NTAG 424 DNA, a DESFire with an
  * NDEF application, ...). */

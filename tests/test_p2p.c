@@ -31,6 +31,20 @@ int nci_rf_interface_of(nci *d)
     assert(!"nci_rf_interface_of must not be reached in the pure unit test");
     return 0;
 }
+/* nci_snep_serve (snep.c) uses these two device.c raw halves; the scripted
+ * server test below drives nci_snep_serve directly, so stub them too. */
+int nci_send_raw(nci *d, const uint8_t *tx, size_t tx_len)
+{
+    (void)d; (void)tx; (void)tx_len;
+    assert(!"nci_send_raw must not be reached in the pure unit test");
+    return NCI_E_NOTSUP;
+}
+int nci_recv_raw(nci *d, uint8_t *rx, size_t rx_cap, int timeout_ms)
+{
+    (void)d; (void)rx; (void)rx_cap; (void)timeout_ms;
+    assert(!"nci_recv_raw must not be reached in the pure unit test");
+    return NCI_E_NOTSUP;
+}
 
 /* ======================================================= LLCP codec ===== */
 

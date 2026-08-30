@@ -21,7 +21,7 @@
  * the exact SPI mode/CPHA must be confirmed against UM11495 on real silicon.
  */
 #define _POSIX_C_SOURCE 200809L
-#include "spi.h"
+#include "nci_spi.h"
 #include "log.h"
 
 #include <errno.h>

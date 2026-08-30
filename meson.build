@@ -82,6 +82,7 @@ endif
 
 # --- installed headers + pkg-config (impl.txt #137, #139) -----------------
 install_subdir('include/nci', install_dir: get_option('includedir'))
+install_headers('include/libnci.h')   # top-level umbrella (also the ESP32 Arduino discovery entry)
 
 # pkg-config: downstreams do `pkg-config --cflags --libs libnci`. The private
 # requirements let a *static* link resolve the whole transitive closure

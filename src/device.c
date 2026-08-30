@@ -54,6 +54,7 @@ struct nci {
     desfire_aes_session aes;      /* legacy-AES (0xAA) session, if any         */
     desfire_lrp_session lrp;      /* LRP-mode session, if any                  */
     uint32_t            tech_mask;
+    bool                p2p_mode;    /* symmetric NFC-DEP (P2P) discovery armed */
     nci_ce_state        ce;          /* card-emulation (listen mode) state     */
     nci_disc_target     targets[MAX_TARGETS];
     size_t              n_targets;
@@ -226,12 +227,16 @@ nci *nci_open(const char *chipset, const nci_config *cfg)
          * VBAT rail (common on bus-powered ESP32 boards at power-on), so re-pulse VEN and
          * retry a few times before abandoning this candidate. The happy path answers on
          * attempt 0 and is unchanged. */
+        /* Both buses get the same VEN-re-pulse fallback. The SPI standby wake is handled by the
+         * NCI command() resend (a NAK'd write is resend-eligible, not fatal), but a genuinely
+         * missed CORE_RESET on a slow VBAT rail still benefits from a fresh reset attempt. */
+        int max_attempts = 3;
         bool answered = false;
-        for (int attempt = 0; attempt < 3 && !answered; attempt++) {
+        for (int attempt = 0; attempt < max_attempts && !answered; attempt++) {
             /* reset() re-pulses VEN with its own ~40 ms of settle, which doubles as the
              * inter-attempt delay (and keeps this path free of a sleep helper). */
             if (d->t->reset(d->t->ctx, false) == 0 &&
-                nci_core_reset(d->t, &d->info) == NCI_OK)
+                nci_core_reset(d->t, &d->info, 0x01) == NCI_OK)   /* reset-config: clean bring-up */
                 answered = true;
         }
         if (answered) {
@@ -315,8 +320,66 @@ int nci_start_discovery(nci *d, uint32_t tech_mask)
 {
     if (!d) return NCI_E_INVAL;
     if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to discover */
+    d->p2p_mode = false;
     d->tech_mask = tech_mask ? tech_mask : NCI_TECH_ALL;
     return nci_rf_discover_mask(d->t, d->tech_mask);
+}
+
+/* Re-arm discovery after a tag/link goes away, preserving P2P (symmetric
+ * poll+listen NFC-DEP) vs plain reader mode. */
+static int rearm_discovery(nci *d)
+{
+    return d->p2p_mode ? nci_p2p_discover(d->t)
+                       : nci_rf_discover_mask(d->t, d->tech_mask ? d->tech_mask : NCI_TECH_A);
+}
+
+/* ---- peer-to-peer (NFC-DEP / LLCP / SNEP) ------------------------------ *
+ * Advertise LLCP in the NFC-DEP ATR general bytes, then arm SYMMETRIC discovery
+ * (poll AND listen NFC-DEP) so two libnci peers auto-negotiate roles by the
+ * NFCC's discovery-period timing. Whichever board's poll catches the other
+ * listening becomes the initiator; nci_poll() returns the NFC-DEP activation and
+ * nci_p2p_is_target() reports the role. The initiator drives nci_snep_put()/get;
+ * the target answers with nci_snep_serve(). Live P2P is BENCH-UNVERIFIED. */
+int nci_p2p_start(nci *d)
+{
+    if (!d) return NCI_E_INVAL;
+    if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC */
+    (void)nci_rf_deactivate_idle(d->t);               /* leave any prior discovery */
+    int r = nci_set_p2p_gen_bytes(d->t);
+    if (r != NCI_OK && r != NCI_E_STATUS) return r;   /* a rejected config is non-fatal on some NFCCs */
+    r = nci_p2p_discover(d->t);
+    if (r == NCI_OK) { d->p2p_mode = true; d->tech_mask = 0; }
+    return r;
+}
+
+/* True when the active link is NFC-DEP and we are the listen-side (target).
+ * Role bit is 0x80 of the RF_INTF_ACTIVATED_NTF activation tech&mode. */
+bool nci_p2p_is_target(nci *d)
+{
+    return d && d->conn.activated && d->conn.rf_interface == 0x03
+        && (d->conn.tech_mode & 0x80);
+}
+
+/* Raw Conn-0 halves for the NFC-DEP target responder (recv-then-send; it never
+ * transmits first). send: NCI_OK/<0. recv: len>0, 0 timeout, <0 link gone. */
+int nci_send_raw(nci *d, const uint8_t *tx, size_t tx_len)
+{
+    if (!d || !tx) return NCI_E_INVAL;
+    if (d->remote_apdu || !d->t) return NCI_E_NOTSUP;
+    if (!d->conn.activated) return NCI_E_NO_TAG;
+    return nci_data_send(d->t, &d->conn, tx, tx_len);
+}
+
+int nci_recv_raw(nci *d, uint8_t *rx, size_t rx_cap, int timeout_ms)
+{
+    if (!d || !rx) return NCI_E_INVAL;
+    if (d->remote_apdu || !d->t) return NCI_E_NOTSUP;
+    if (!d->conn.activated) return NCI_E_NO_TAG;
+    size_t rl = 0;
+    int r = nci_data_recv(d->t, &d->conn, rx, rx_cap, &rl, timeout_ms < 0 ? 1000 : timeout_ms);
+    if (r == 0) return 0;                                    /* timeout */
+    if (r < 0)  return d->conn.activated ? NCI_E_IO : NCI_E_TAG_GONE;
+    return (int)rl;
 }
 
 /* ---- card emulation (listen mode T4T NDEF) — see src/ce.c -------------- */
@@ -387,7 +450,7 @@ int nci_poll(nci *d, nci_tag *out, int timeout_ms)
              * just-collected census (d->n_targets) is kept so the caller can
              * still LIST what the field held; a select must run a fresh cycle. */
             nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
-            if (d->tech_mask) nci_rf_discover_mask(d->t, d->tech_mask);
+            rearm_discovery(d);
             return NCI_POLL_NONE;
         }
         out->more = (d->n_targets > 1);
@@ -445,7 +508,7 @@ static int census_run(nci *d, nci_tag *tag, int timeout_ms)
     for (int k = 0; k < 2 && !started; k++) {
         nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
         while (d->t->read(d->t->ctx, junk, sizeof junk, 30) > 0) {}   /* flush stale burst */
-        started = nci_rf_discover_mask(d->t, d->tech_mask ? d->tech_mask : NCI_TECH_A) == NCI_OK;
+        started = rearm_discovery(d) == NCI_OK;
     }
     d->conn.activated = false;                       /* whatever session existed is gone */
     d->n_targets = 0; d->sel_idx = 0;
@@ -471,7 +534,7 @@ static void census_rearm(nci *d)
 {
     nci_rf_deactivate(d->t, NCI_DEACT_IDLE);
     d->conn.activated = false;
-    if (d->tech_mask) nci_rf_discover_mask(d->t, d->tech_mask);
+    rearm_discovery(d);
 }
 
 /* Public census: enumerate the field into `out` (like nci_list_targets) but running a

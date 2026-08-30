@@ -74,6 +74,10 @@ int nci_desfire_parse_file_settings(const uint8_t *buf, size_t len,
         if (len < i + 9) return NCI_E_PROTO;
         out->size = (uint32_t)buf[i] | ((uint32_t)buf[i + 1] << 8) |
                     ((uint32_t)buf[i + 2] << 16);   /* per-record size */
+        out->max_records = (uint32_t)buf[i + 3] | ((uint32_t)buf[i + 4] << 8) |
+                           ((uint32_t)buf[i + 5] << 16);
+        out->cur_records = (uint32_t)buf[i + 6] | ((uint32_t)buf[i + 7] << 8) |
+                           ((uint32_t)buf[i + 8] << 16);   /* records that exist NOW */
         break;
     default:     /* TransactionMAC (0x05) / unknown: header already captured */
         out->size = 0;

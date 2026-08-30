@@ -119,7 +119,7 @@ static void test_bringup_and_uid(void)
     mock_push(&m, ACT_NTF,   sizeof ACT_NTF);
 
     nci_dev_info info;
-    assert(nci_core_reset(&t, &info) == NCI_OK);
+    assert(nci_core_reset(&t, &info, 0x01) == NCI_OK);
     assert(info.nci_version == 0x20);
     assert(info.manuf_id == 0x04);
     assert(info.fw_info_len == 4);
@@ -160,7 +160,7 @@ static void test_bad_status_fails(void)
         .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
     };
     mock_push(&m, RESET_RSP_BAD, sizeof RESET_RSP_BAD);
-    assert(nci_core_reset(&t, NULL) == NCI_E_STATUS);
+    assert(nci_core_reset(&t, NULL, 0x01) == NCI_E_STATUS);
     printf("  bad_status_fails: OK (NCI_E_STATUS)\n");
 }
 
@@ -173,7 +173,7 @@ static void test_typed_errors(void)
         nci_transport t = {
             .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
         };
-        assert(nci_core_reset(&t, NULL) == NCI_E_TIMEOUT);
+        assert(nci_core_reset(&t, NULL, 0x01) == NCI_E_TIMEOUT);
     }
     /* (b) transport write fault -> NCI_E_IO. */
     {
@@ -181,7 +181,7 @@ static void test_typed_errors(void)
         nci_transport t = {
             .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset,
         };
-        assert(nci_core_reset(&t, NULL) == NCI_E_IO);
+        assert(nci_core_reset(&t, NULL, 0x01) == NCI_E_IO);
     }
     printf("  typed_errors: OK (TIMEOUT + IO)\n");
 }

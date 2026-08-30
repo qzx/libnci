@@ -18,11 +18,17 @@
  * PDU. The public nci_snep_put(nci*)/nci_snep_get(nci*) facade wires that seam
  * to the NFC-DEP RF interface when the active tag is on it.
  *
- * DEFERRED (hardware layer): the raw NFC-DEP RF *activation* over NCI - the
- * RF_DISCOVER for NFC-DEP, the ATR_REQ/ATR_RES parameter exchange, and the
- * initiator/target role selection - is not done here. This module assumes an
- * already-activated NFC-DEP link and returns NCI_E_NOTSUP from the nci-handle
- * facade until the tag is activated on NCI_RF_NFCDEP.
+ * HARDWARE LAYER (now wired): nci_p2p_start() arms symmetric poll+listen NFC-DEP
+ * discovery; the NFCC runs the ATR_REQ/ATR_RES exchange and DEP framing. On the
+ * NFC-DEP activation nci_poll() returns, nci_p2p_is_target() gives the role: the
+ * initiator drives nci_snep_put()/get(), the target answers with nci_snep_serve().
+ *
+ * LIMITATIONS: SNEP direction is initiator->target per link (the target runs a
+ * PUT server, no client - it answers GET with NOT_IMPLEMENTED). Which physical
+ * board initiates is decided by the NFCC's discovery timing and may alternate.
+ * Scope is two libnci peers; phone (Android Beam) interop is out of scope.
+ * nci_p2p_start() and nci_ce_start() are mutually exclusive (both use NFC-A
+ * listen config). Live P2P is bench-tested board-to-board.
  */
 #ifndef NCI_P2P_H
 #define NCI_P2P_H
@@ -284,9 +290,29 @@ int nci_snep_get_link(nci_llcp_link_fn link, void *ctx,
                       const uint8_t *req_ndef, size_t req_len,
                       uint8_t *out, size_t cap, size_t *out_len);
 
+/* Start symmetric P2P: advertise LLCP in the ATR general bytes, then arm
+ * poll+listen NFC-DEP discovery so two peers auto-negotiate initiator/target.
+ * When a peer activates on the NFC-DEP RF interface (nci_poll returns a tag with
+ * protocol NFC-DEP), use nci_p2p_is_target() to pick nci_snep_put/get (initiator)
+ * vs nci_snep_serve (target). */
+int nci_p2p_start(nci *d);
+
+/* True when the active link is NFC-DEP and this device is the target (listen
+ * side). Role = bit 0x80 of the RF_INTF_ACTIVATED_NTF activation tech&mode. */
+bool nci_p2p_is_target(nci *d);
+
+/* Target-side SNEP PUT server: after an NFC-DEP activation where we are the
+ * target, wait for the initiator's LLCP CONNECT + SNEP PUT and receive the NDEF
+ * message into out (header stripped). Returns NCI_OK with *out_len set on a
+ * completed PUT, NCI_TIMEOUT if the budget elapses with no PUT, NCI_E_TAG_GONE
+ * if the link drops, or NCI_E_NOTSUP when the active link is not NFC-DEP. The
+ * target never transmits first. GET requests are answered NOT_IMPLEMENTED. */
+int nci_snep_serve(nci *d, uint8_t *out, size_t cap, size_t *out_len,
+                   int timeout_ms);
+
 /* Handle facade: drive SNEP over the tag's activated NFC-DEP link. Returns
- * NCI_E_NOTSUP when the active tag is not on the NFC-DEP RF interface (the RF
- * activation is a hardware-layer concern deferred out of this module). */
+ * NCI_E_NOTSUP when the active tag is not on the NFC-DEP RF interface. Enable
+ * the link first with nci_p2p_start(). */
 int nci_snep_put(nci *d, const uint8_t *ndef, size_t len);
 int nci_snep_get(nci *d, const uint8_t *req_ndef, size_t req_len,
                  uint8_t *out, size_t cap, size_t *out_len);

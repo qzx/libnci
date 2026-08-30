@@ -9,6 +9,7 @@
 #include <openssl/evp.h>
 #include <openssl/cmac.h>
 #include <openssl/rand.h>
+#include <openssl/core_names.h>
 #include <openssl/params.h>
 
 static int cbc(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_BLOCK],
@@ -93,6 +94,65 @@ int crypto_aes_cmac(const uint8_t key[AES_KEY_LEN],
     if (len && EVP_MAC_update(ctx, data, len) != 1) goto out_ctx;
     if (EVP_MAC_final(ctx, out, &outl, AES_BLOCK) != 1) goto out_ctx;
     rc = (outl == AES_BLOCK) ? 0 : -1;
+out_ctx:
+    EVP_MAC_CTX_free(ctx);
+out_mac:
+    EVP_MAC_free(mac);
+    return rc;
+}
+
+int crypto_hmac_sha256(const uint8_t *key, size_t key_len,
+                       const uint8_t *a, size_t alen,
+                       const uint8_t *b, size_t blen, uint8_t out[32])
+{
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    if (!mac) { LOGE("crypto: EVP_MAC_fetch(HMAC) failed"); return -1; }
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    int rc = -1;
+    if (!ctx) goto out_mac;
+
+    char digest[] = "SHA256";
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, digest, 0),
+        OSSL_PARAM_construct_end(),
+    };
+    size_t outl = 0;
+    if (EVP_MAC_init(ctx, key, key_len, params) != 1) goto out_ctx;
+    if (alen && EVP_MAC_update(ctx, a, alen) != 1) goto out_ctx;
+    if (blen && EVP_MAC_update(ctx, b, blen) != 1) goto out_ctx;
+    if (EVP_MAC_final(ctx, out, &outl, 32) != 1) goto out_ctx;
+    rc = (outl == 32) ? 0 : -1;
+out_ctx:
+    EVP_MAC_CTX_free(ctx);
+out_mac:
+    EVP_MAC_free(mac);
+    return rc;
+}
+
+int crypto_tdea_cmac(const uint8_t *key, size_t keylen,
+                     const uint8_t *data, size_t len, uint8_t out[8])
+{
+    const char *cipher;
+    if      (keylen == 16) cipher = "DES-EDE-CBC";   /* 2-key 3DES (EDE2) */
+    else if (keylen == 24) cipher = "DES-EDE3-CBC";  /* 3-key 3DES (EDE3) */
+    else { LOGE("crypto: bad tdea-cmac keylen %zu", keylen); return -1; }
+
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "CMAC", NULL);
+    if (!mac) { LOGE("crypto: EVP_MAC_fetch(CMAC) failed"); return -1; }
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    int rc = -1;
+    if (!ctx) goto out_mac;
+
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER,
+                                         (char *)(uintptr_t)cipher, 0),
+        OSSL_PARAM_construct_end(),
+    };
+    size_t outl = 0;
+    if (EVP_MAC_init(ctx, key, keylen, params) != 1) goto out_ctx;
+    if (len && EVP_MAC_update(ctx, data, len) != 1) goto out_ctx;
+    if (EVP_MAC_final(ctx, out, &outl, 8) != 1) goto out_ctx;
+    rc = (outl == 8) ? 0 : -1;
 out_ctx:
     EVP_MAC_CTX_free(ctx);
 out_mac:

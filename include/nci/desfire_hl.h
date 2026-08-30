@@ -40,6 +40,10 @@ typedef struct {
     uint16_t access_rights;     /* 4 nibbles Read<<12|Write<<8|RW<<4|Change   */
     uint32_t size;              /* std/backup: FileSize; record: RecordSize;
                                  * value/TMAC: 0 (no byte size)                */
+    uint32_t max_records;       /* record files: MaxRecords (capacity); else 0 */
+    uint32_t cur_records;       /* record files: CurrentRecords (records that
+                                 * exist NOW -- sizes a delta fold without an
+                                 * on-card manifest); else 0                   */
     uint8_t  file_option;       /* raw FileOption byte (comm in low bits,
                                  * bit6 = SDM / mirroring enabled)             */
     bool     sdm;               /* true when FileOption bit6 is set            */
