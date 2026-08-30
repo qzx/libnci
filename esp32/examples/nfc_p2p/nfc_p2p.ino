@@ -20,7 +20,7 @@
   #define PIN_IRQ  1
   #define PIN_DWL  0
   #define SPI_HZ   1000000
-  extern "C" void nci_esp32_spi_set_pins(int sck, int miso, int mosi, int cs);
+  // nci_esp32_spi_set_pins() comes from <libnci.h> (nci/esp32.h).
   static const char *WHOAMI = "spi";
 #else
   #include <Wire.h>

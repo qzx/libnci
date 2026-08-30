@@ -146,15 +146,27 @@ int nci_desfire_lrp_change_file_settings(nci *p, uint8_t file_no,
                                             uint8_t file_option, uint16_t access_rights);
 
 /* Recommended authentication entry point. Establishes a usable secure session
- * for subsequent metadata/file operations. Today this performs
- * AuthenticateEV2First (AES), the method used by DESFire EV2/EV3 and NTAG 424
- * DNA; it is the single call applications should use so future auth-method
- * negotiation (legacy DES/2K3DES, AES-EV1) can be added here without changing
- * call sites. Returns NCI_OK or NCI_ERR. */
+ * for subsequent metadata/file operations, NEGOTIATING the method: it tries
+ * AuthenticateEV2First (AES) first - the method for DESFire EV2/EV3 and NTAG 424
+ * DNA - and, if the card rejects it (the deployed QZX decks answer 0x91AE on their
+ * file key slots), falls back to legacy AES (0xAA) with the same key. The read/
+ * write facade then routes transparently to whichever channel won; use
+ * nci_desfire_auth_method() to learn which. Returns NCI_OK or NCI_ERR. */
 int nci_desfire_authenticate(nci *p, uint8_t key_no, const uint8_t key[16]);
 
 /* True if a secure session is currently established. */
 bool nci_desfire_session_active(nci *p);
+
+/* Which secure channel is currently live (which authenticate method won the
+ * negotiation). Lets the reader log/branch on the negotiated method. */
+typedef enum {
+    NCI_DESFIRE_AUTH_NONE = 0,  /* no active session                          */
+    NCI_DESFIRE_AUTH_EV2,       /* AuthenticateEV2First (AES) - EV2/EV3/NTAG424 */
+    NCI_DESFIRE_AUTH_AES,       /* legacy AES (0xAA) - the deployed-deck path   */
+    NCI_DESFIRE_AUTH_LEGACY,    /* legacy / ISO 3DES (0x0A / 0x1A)              */
+    NCI_DESFIRE_AUTH_LRP,       /* Leakage-Resilient Primitive session          */
+} nci_desfire_auth;
+nci_desfire_auth nci_desfire_auth_method(nci *p);
 
 /* DESFire status byte from the most recent secure-messaging command (0x00 =
  * OK). After a failing call this tells the application why (e.g. 0x9D
@@ -273,7 +285,15 @@ int nci_desfire_change_key_to_aes(nci *p, uint8_t key_no,
                                      const uint8_t new_aes[16], uint8_t new_version);
 
 /* ---- EV3: value files (requires an active session) ------------------- *
- * comm is NCI_DESFIRE_PLAIN/MAC/FULL. Values are signed 32-bit. */
+ * comm is NCI_DESFIRE_PLAIN/MAC/FULL. Values are signed 32-bit.
+ *
+ * AUTH-METHOD RULING (N4.2): the value-MODIFY and transaction ops below -
+ * create_value_file, credit, debit, limited_credit, commit/abort_transaction -
+ * are EV2-only in libnci. They run over the EV2/EV3 secure channel; the legacy-AES
+ * (0xAA) and 3DES channels carry no transaction-MAC, and reader value decks are EV2
+ * by design (qzxlib Q3). Called under a live NON-EV2 session they return
+ * NCI_E_NOTSUP (auth method does not support this op), not a silent failure.
+ * nci_desfire_get_value (read-only) is the exception: it works under AES/legacy too. */
 int nci_desfire_create_value_file(nci *p, uint8_t file_no, uint8_t comm,
                                      uint16_t access_rights, int32_t lower,
                                      int32_t upper, int32_t value,

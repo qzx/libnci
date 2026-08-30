@@ -80,8 +80,12 @@ const nci_chip nci_chip_pn7160 = {
         .name             = "pn7160",
         .description      = "NXP PN7160/PN7161 NCI 2.0 NFC controller",
         .default_i2c_addr = 0x28,
-        .caps             = NCI_CAP_ISO_DEP | NCI_CAP_NFC_DEP |
-                            NCI_CAP_CE | NCI_CAP_FW_UPDATE,
+        /* No NCI_CAP_FW_UPDATE: the NXP DWL firmware-download protocol is only
+         * stubbed (session entry points + frame codec, opcodes UNVERIFIED against
+         * UM11495; no image flasher) - see transport.h. Advertising the cap would
+         * claim a capability nci_dev_caps reports as real, so it stays cleared
+         * until DWL is implemented and bench-verified. */
+        .caps             = NCI_CAP_ISO_DEP | NCI_CAP_NFC_DEP | NCI_CAP_CE,
     },
     .transport_open = nci_transport_open,
     .configure      = nci_configure,

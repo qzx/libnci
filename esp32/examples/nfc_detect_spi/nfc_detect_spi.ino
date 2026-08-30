@@ -26,8 +26,8 @@
 #define PIN_DWL   0
 #define SPI_HZ    1000000    // 1 MHz: reads need to clock fast enough to catch the data window
 
-// Implemented in esp32/src/spi_esp32.cpp; selects the FSPI pins + managed CS.
-extern "C" void nci_esp32_spi_set_pins(int sck, int miso, int mosi, int cs);
+// nci_esp32_spi_set_pins() is declared by <libnci.h> (nci/esp32.h); it selects the
+// FSPI pins + manual CS the SPI backend (esp32/src/spi_esp32.cpp) drives.
 
 static nci *dev = nullptr;
 static char g_status[80] = "booting";

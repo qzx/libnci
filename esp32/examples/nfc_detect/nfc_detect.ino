@@ -8,7 +8,7 @@
 // VEN/IRQ/DWL are GPIOs (IRQ is an input; an input-only pin like 34 is fine).
 
 #include <Wire.h>
-#include <nci/nci.h>
+#include <libnci.h>   // umbrella: attaches the libnci library, then <nci/...> resolves
 
 #define PIN_SDA      21     // I2C data
 #define PIN_SCL      22     // I2C clock

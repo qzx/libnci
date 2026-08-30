@@ -8,7 +8,9 @@
  * mbedtls_cipher_cmac, so it does NOT depend on MBEDTLS_CMAC_C being enabled in
  * the core's mbedTLS config - CMAC is central to DESFire/NTAG/SDM/LRP, so we
  * never want it to be a config landmine. The exact same byte logic is
- * host-verified against the OpenSSL CMAC in tests/test_cmac_logic.c.
+ * host-verified against the OpenSSL CMAC via the shared crypto.h contract
+ * (tests/test_kdf.c pins the AES-CMAC / TDEA-CMAC / HMAC vectors both backends
+ * must reproduce).
  *
  * 3DES (legacy DESFire 0x0A / ISO 0x1A auth) uses mbedTLS DES, guarded by
  * MBEDTLS_DES_C; if the core's mbedTLS has DES compiled out, crypto_3des_cbc
@@ -82,8 +84,8 @@ int crypto_aes_cbc_decrypt(const uint8_t key[AES_KEY_LEN], const uint8_t iv[AES_
 }
 
 /* ---- AES-128-CMAC (RFC 4493) on top of ECB ---------------------------- *
- * Self-contained so it does not need MBEDTLS_CMAC_C. The byte logic here is
- * identical to tests/test_cmac_logic.c, which is checked against OpenSSL CMAC. */
+ * Self-contained so it does not need MBEDTLS_CMAC_C. The byte logic here is the
+ * same crypto.h contract host-checked against OpenSSL CMAC in tests/test_kdf.c. */
 
 /* GF(2^128) doubling: out = (in << 1), XOR 0x87 if the high bit was set. */
 static void cmac_dbl(const uint8_t in[16], uint8_t out[16])

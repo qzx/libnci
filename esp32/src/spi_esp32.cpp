@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nci_spi.h"
+#include "nci/esp32.h"   /* public nci_esp32_spi_set_pins declaration (decl == def) */
 
 #define TDD_WRITE   0x7F
 #define TDD_READ    0xFF

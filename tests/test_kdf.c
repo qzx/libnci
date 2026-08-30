@@ -143,6 +143,26 @@ static void test_node_key(void)
     printf("  derive_node_key (HMAC uid||seed, UID-bound): OK\n");
 }
 
+/* N6.2 - backend-parity golden vector. This is the deployed "0014" node key:
+ *   worldKey = 0x86 + i (i=0..15), uid = 04A2C7B19E6F80, seed = 706F772E63AABBCCDD
+ *   node key = trunc16(HMAC-SHA256(worldKey, uid || seed)) = b5e83f06...c1716941
+ * It is asserted here against the compiled crypto backend (OpenSSL on the host).
+ * Because it - like the RFC 4231 and AN10922 vectors above - is a fixed known
+ * answer of the crypto.h contract, ANY conformant backend must reproduce it: the
+ * ESP32 mbedTLS backend (esp32/src/crypto_esp32.c) implements the same crypto.h
+ * primitives, so passing these vectors on the host is the off-bench parity proof;
+ * the on-device kdf_selftest is the final bench confirmation (PENDING-HARDWARE). */
+static void test_node_key_golden_0014(void)
+{
+    uint8_t wk[16], uid[7], seed[9], key[16];
+    for (int i = 0; i < 16; i++) wk[i] = (uint8_t)(0x86 + i);
+    unhex("04A2C7B19E6F80", uid, 7);
+    unhex("706F772E63AABBCCDD", seed, 9);
+    assert(nci_derive_node_key(wk, 16, uid, 7, seed, 9, key) == NCI_OK);
+    assert(eqhex(key, "b5e83f069dc606c1f72823ebc1716941", 16));
+    printf("  derive_node_key (0014 golden vector, backend-parity KAT): OK\n");
+}
+
 static void test_invalid_args(void)
 {
     uint8_t k[24] = {0}, div[4] = {1,2,3,4}, out[32];
@@ -166,6 +186,7 @@ int main(void)
     test_an10922_aes128();
     test_an10922_3des();
     test_node_key();
+    test_node_key_golden_0014();
     test_invalid_args();
     printf("all tests passed\n");
     return 0;

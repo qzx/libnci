@@ -53,6 +53,14 @@ struct nci {
     desfire_legacy_session legacy;/* DES/3DES legacy/ISO auth session, if any  */
     desfire_aes_session aes;      /* legacy-AES (0xAA) session, if any         */
     desfire_lrp_session lrp;      /* LRP-mode session, if any                  */
+    /* N1 session hygiene: the UID of the currently RF-activated target, and the
+     * UID a live DESFire session is bound to. Every (re)activation clears the
+     * sessions (see desfire_sessions_reset); a secure op whose session UID no
+     * longer matches the activated UID fails NCI_E_SESSION_CARD_MISMATCH. */
+    uint8_t             active_uid[NCI_MAX_UID_LEN];
+    uint8_t             active_uid_len;
+    uint8_t             session_uid[NCI_MAX_UID_LEN];
+    uint8_t             session_uid_len;
     uint32_t            tech_mask;
     bool                p2p_mode;    /* symmetric NFC-DEP (P2P) discovery armed */
     nci_ce_state        ce;          /* card-emulation (listen mode) state     */
@@ -105,6 +113,7 @@ const char *nci_strerror(int status)
     case NCI_E_STATUS:   return "card returned an error status";
     case NCI_E_NO_TAG:   return "no tag activated";
     case NCI_E_ABORTED:  return "operation aborted";
+    case NCI_E_SESSION_CARD_MISMATCH: return "secure op on a different card than the session";
     default:             return status > 0 ? "ok (length)" : "unknown error";
     }
 }
@@ -265,6 +274,33 @@ fail:
 }
 #endif /* NCI_HEADLESS */
 
+/* Open a device over a caller-supplied transport instead of a built-in bus. Runs
+ * the standard NCI bring-up (CORE_RESET, CORE_INIT, RF_DISCOVER_MAP) so the whole
+ * public nci_* device API (poll/select/DESFire) drives over `t`. No chipset
+ * configure hook runs - the caller's transport IS the controller - which keeps
+ * this available in EVERY build (hardware or headless) and makes it the seam for
+ * exercising the device layer against a mock transport. Ownership of `t` transfers
+ * to the handle (freed by nci_close on a hardware build). NULL on any bring-up
+ * error. (For a chipset with a PMU/discovery configure step, use nci_open.) */
+nci *nci_open_transport(nci_transport *t)
+{
+    if (!t) return NULL;
+    nci *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
+    d->chip      = NULL;                 /* caller-supplied controller; no driver */
+    d->tech_mask = NCI_TECH_ALL;
+    d->t         = t;
+
+    if (t->reset) t->reset(t->ctx, false);
+    if (nci_core_reset(d->t, &d->info, 0x01) != NCI_OK) goto fail;
+    if (nci_core_init(d->t, &d->info)        != NCI_OK) goto fail;
+    if (nci_rf_discover_map(d->t)            != NCI_OK) goto fail;
+    return d;
+fail:
+    nci_close(d);
+    return NULL;
+}
+
 /* Headless handle: no local NFCC - transceive is delegated to `fn` (the caller moves the bytes,
  * e.g. tunnels the APDU over a socket to the BLE bridge). We present a pre-activated ISO-DEP tag so
  * nci_tag_supports_apdu() passes and every nci_desfire_* facade drives the same crypto over `fn`.
@@ -415,6 +451,66 @@ bool nci_ce_reader_present(nci *d)
 }
 
 /* Issue RF_DISCOVER_SELECT for a buffered target and wait for its activation. */
+/* N1 session hygiene ---------------------------------------------------------
+ * Zeroize all four DESFire secure sessions (keys, TI, CmdCtr, active flags) and
+ * drop the session-UID binding. Called on every RF target (re)activation and
+ * deactivation so a new or other card never inherits the prior card's keys. */
+static void desfire_sessions_reset(nci *d)
+{
+    memset(&d->ev2,    0, sizeof d->ev2);
+    memset(&d->legacy, 0, sizeof d->legacy);
+    memset(&d->aes,    0, sizeof d->aes);
+    memset(&d->lrp,    0, sizeof d->lrp);
+    d->session_uid_len = 0;
+}
+
+/* Record the just-activated target's UID and clear any carried-over session. */
+static void on_target_activated(nci *d, const nci_tag *t)
+{
+    desfire_sessions_reset(d);
+    d->active_uid_len = t->uid_len <= NCI_MAX_UID_LEN ? t->uid_len : NCI_MAX_UID_LEN;
+    if (d->active_uid_len) memcpy(d->active_uid, t->uid, d->active_uid_len);
+}
+
+/* Bind the live session to the activated UID (after a successful authenticate). */
+static void bind_session_uid(nci *d)
+{
+    d->session_uid_len = d->active_uid_len;
+    if (d->session_uid_len) memcpy(d->session_uid, d->active_uid, d->session_uid_len);
+}
+
+/* True when no session is bound, or the bound UID matches the activated UID. */
+static bool session_uid_ok(const nci *d)
+{
+    if (d->session_uid_len == 0) return true;
+    return d->session_uid_len == d->active_uid_len &&
+           memcmp(d->session_uid, d->active_uid, d->session_uid_len) == 0;
+}
+
+/* EV2 secure-op guard: the channel must be an active EV2 session bound to the
+ * card we are still talking to. */
+#define EV2_GUARD(p) do { if (!(p) || !(p)->ev2.active) return NCI_ERR; \
+    if (!session_uid_ok(p)) return NCI_E_SESSION_CARD_MISMATCH; } while (0)
+
+/* N1.2 cross-channel UID guard. The non-EV2 secure ops (legacy-AES 0xAA / 3DES)
+ * dispatch to their channel before reaching EV2_GUARD, so they carry this instead:
+ * refuse a secure op whose bound session UID no longer matches the activated card.
+ * Belt-and-suspenders behind N1.1 - which resets every session on each activation,
+ * so session_uid_ok() can only fail if some future path mutates the activated UID
+ * without clearing the session - but it makes the refusal channel-agnostic. */
+#define SESSION_CARD_GUARD(p) do { \
+    if ((p) && !session_uid_ok(p)) return NCI_E_SESSION_CARD_MISMATCH; } while (0)
+
+/* N4.2 ruling: value-file and transaction ops (credit/debit/limited-credit,
+ * create-value-file, commit/abort) are EV2-only in libnci - the legacy-AES (0xAA)
+ * and 3DES channels have no transaction-MAC implementation, and the reader's value
+ * decks are EV2 by design (qzxlib Q3). Under a live NON-EV2 session, refuse with a
+ * clear NCI_E_NOTSUP ("auth method does not support this op") instead of the opaque
+ * NCI_ERR that EV2_GUARD's inactive-EV2 branch would otherwise return. */
+#define EV2_VALUE_GUARD(p) do { \
+    if ((p) && ((p)->aes.active || (p)->legacy.session_len)) return NCI_E_NOTSUP; \
+    EV2_GUARD(p); } while (0)
+
 static int activate_target(nci *d, size_t idx, nci_tag *out)
 {
     if (idx >= d->n_targets) return NCI_E_INVAL;
@@ -425,6 +521,7 @@ static int activate_target(nci *d, size_t idx, nci_tag *out)
     if (nci_wait_activation(d->t, out, &d->conn, 1000) != NCI_TAG_FOUND)
         return NCI_E_TAG_GONE;
     out->disc_id = tg->rf_disc_id;
+    on_target_activated(d, out);          /* N1: fresh target -> clear any old session */
     return NCI_OK;
 }
 
@@ -456,7 +553,7 @@ int nci_poll(nci *d, nci_tag *out, int timeout_ms)
         out->more = (d->n_targets > 1);
         return NCI_POLL_TAG;
     }
-    if (r == NCI_TAG_FOUND) { out->more = false; return NCI_POLL_TAG; }
+    if (r == NCI_TAG_FOUND) { on_target_activated(d, out); out->more = false; return NCI_POLL_TAG; }
     return r;   /* NCI_POLL_NONE (0) or a negative status */
 }
 
@@ -473,7 +570,7 @@ int nci_select_next_tag(nci *d, nci_tag *out)
     return r;
 }
 
-int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol)
+int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol, nci_tag *out)
 {
     if (!d) return NCI_E_INVAL;
     for (size_t i = 0; i < d->n_targets; i++) {
@@ -482,7 +579,9 @@ int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol)
             nci_tag tmp;
             nci_rf_deactivate(d->t, 0x01);
             d->sel_idx = i;
-            return activate_target(d, i, &tmp);
+            /* Fill *out from the activation NTF (the wire truth), mirroring
+             * nci_select_uid, so the caller can confirm which card it got. */
+            return activate_target(d, i, out ? out : &tmp);
         }
     }
     return NCI_E_INVAL;
@@ -547,6 +646,14 @@ int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms)
     nci_tag tag;
     census_run(d, &tag, timeout_ms > 0 ? timeout_ms : 500);
     int n = nci_list_targets(d, out, cap);
+    /* N2.1: census re-arms discovery below, which ENDS the round the disc_ids
+     * belong to - they are meaningless across calls. Zero them in the returned
+     * rows so no caller can select on a stale id; UID is the cross-call identity,
+     * and nci_select_uid is the sole cross-call selector. */
+    if (out) {
+        size_t rows = ((size_t)n < cap) ? (size_t)n : cap;
+        for (size_t i = 0; i < rows; i++) out[i].disc_id = 0;
+    }
     census_rearm(d);
     return n;
 }
@@ -631,14 +738,14 @@ bool nci_tag_present(nci *d)
     uint8_t iface   = d->conn.rf_interface;
 
     if (nci_rf_deactivate(d->t, 0x01 /*Sleep*/) != NCI_OK) {
-        d->conn.activated = false; d->ev2.active = false; return false;
+        d->conn.activated = false; desfire_sessions_reset(d); return false;
     }
     nci_tag tmp;
     if (nci_rf_discover_select(d->t, disc_id, proto, iface) != NCI_OK ||
         nci_wait_activation(d->t, &tmp, &d->conn, 500) != NCI_TAG_FOUND) {
-        d->conn.activated = false; d->ev2.active = false; return false;
+        d->conn.activated = false; desfire_sessions_reset(d); return false;
     }
-    d->ev2.active = false;   /* the sleep/re-select reset any secure session */
+    desfire_sessions_reset(d);   /* the sleep/re-select reset any secure session */
     return true;
 }
 
@@ -662,7 +769,7 @@ int nci_switch_rf_interface(nci *d, nci_rf_interface iface)
         return NCI_E_TAG_GONE;
     if (nci_wait_activation(d->t, &tmp, &d->conn, 1000) != NCI_TAG_FOUND)
         return NCI_E_TAG_GONE;
-    d->ev2.active = false;   /* interface change resets any secure session */
+    desfire_sessions_reset(d);   /* interface change resets any secure session */
     return NCI_OK;
 }
 
@@ -672,7 +779,7 @@ int nci_deactivate(nci *d, nci_deactivate_mode mode)
     if (!d->t) return NCI_E_NOTSUP;   /* headless handle: no local NFCC to deactivate */
     if (mode == NCI_DEACT_IDLE || mode == NCI_DEACT_DISCOVERY) {
         d->conn.activated = false;
-        d->ev2.active = false;
+        desfire_sessions_reset(d);
     }
     return nci_rf_deactivate(d->t, (uint8_t)mode);
 }
@@ -1274,9 +1381,7 @@ int nci_desfire_get_application_ids(nci *p, uint32_t *aids,
 int nci_desfire_select_application(nci *p, uint32_t aid)
 {
     if (!p || !nci_tag_supports_apdu(p)) return NCI_ERR;
-    p->ev2.active = false;   /* selecting an application ends any session */
-    p->aes.active = false;
-    p->legacy.session_len = 0;
+    desfire_sessions_reset(p);   /* selecting an application ends any session */
     return desfire_select_application(facade_apdu, p, aid);
 }
 
@@ -1374,8 +1479,10 @@ int nci_desfire_authenticate_ev2(nci *p, uint8_t key_no, const uint8_t key[16])
     p->legacy.session_len = 0;
     p->legacy.last_status = 0;
     int r = desfire_ev2_authenticate(facade_apdu, p, key_no, key, &p->ev2);
-    if (r == NCI_OK)
+    if (r == NCI_OK) {
         p->ev2.frame_size = p->conn.frame_size;
+        bind_session_uid(p);              /* N1.2: bind the session to this card */
+    }
     return r;
 }
 
@@ -1383,7 +1490,9 @@ int nci_desfire_authenticate_nonfirst(nci *p, uint8_t key_no,
                                          const uint8_t key[16])
 {
     if (!p || !p->ev2.active) return NCI_ERR;
-    return desfire_ev2_authenticate_nonfirst(facade_apdu, p, key_no, key, &p->ev2);
+    int r = desfire_ev2_authenticate_nonfirst(facade_apdu, p, key_no, key, &p->ev2);
+    if (r == NCI_OK) bind_session_uid(p);
+    return r;
 }
 
 int nci_desfire_authenticate_aes(nci *p, uint8_t key_no, const uint8_t key[16])
@@ -1393,7 +1502,9 @@ int nci_desfire_authenticate_aes(nci *p, uint8_t key_no, const uint8_t key[16])
     p->ev2.last_status = 0;
     p->legacy.session_len = 0;
     p->legacy.last_status = 0;
-    return desfire_aes_authenticate(facade_apdu, p, key_no, key, &p->aes);
+    int r = desfire_aes_authenticate(facade_apdu, p, key_no, key, &p->aes);
+    if (r == NCI_OK) bind_session_uid(p);
+    return r;
 }
 
 int nci_desfire_authenticate_iso(nci *p, uint8_t key_no,
@@ -1404,7 +1515,9 @@ int nci_desfire_authenticate_iso(nci *p, uint8_t key_no,
     p->ev2.last_status = 0;
     p->aes.active = false;   /* mutually exclusive with an EV2 / legacy-AES session */
     p->aes.last_status = 0;
-    return desfire_auth_iso(facade_apdu, p, key_no, key, key_len, &p->legacy);
+    int r = desfire_auth_iso(facade_apdu, p, key_no, key, key_len, &p->legacy);
+    if (r == NCI_OK) bind_session_uid(p);
+    return r;
 }
 
 int nci_desfire_authenticate_legacy(nci *p, uint8_t key_no,
@@ -1415,7 +1528,9 @@ int nci_desfire_authenticate_legacy(nci *p, uint8_t key_no,
     p->ev2.last_status = 0;
     p->aes.active = false;   /* mutually exclusive with an EV2 / legacy-AES session */
     p->aes.last_status = 0;
-    return desfire_auth_legacy(facade_apdu, p, key_no, key, key_len, &p->legacy);
+    int r = desfire_auth_legacy(facade_apdu, p, key_no, key, key_len, &p->legacy);
+    if (r == NCI_OK) bind_session_uid(p);
+    return r;
 }
 
 int nci_desfire_authenticate_lrp(nci *p, uint8_t key_no, const uint8_t key[16])
@@ -1424,7 +1539,9 @@ int nci_desfire_authenticate_lrp(nci *p, uint8_t key_no, const uint8_t key[16])
     p->ev2.active = false;   /* LRP establishes its own (non-EV2) channel */
     p->aes.active = false;
     p->legacy.session_len = 0;
-    return desfire_lrp_authenticate_first(facade_apdu, p, key_no, key, &p->lrp);
+    int r = desfire_lrp_authenticate_first(facade_apdu, p, key_no, key, &p->lrp);
+    if (r == NCI_OK) bind_session_uid(p);
+    return r;
 }
 
 bool nci_desfire_lrp_active(nci *p) { return p && p->lrp.active; }
@@ -1581,7 +1698,18 @@ int nci_desfire_authenticate(nci *p, uint8_t key_no, const uint8_t key[16])
 
 bool nci_desfire_session_active(nci *p)
 {
-    return p && (p->ev2.active || p->aes.active);
+    return p && (p->ev2.active || p->aes.active ||
+                 p->legacy.session_len || p->lrp.active);
+}
+
+nci_desfire_auth nci_desfire_auth_method(nci *p)
+{
+    if (!p)                    return NCI_DESFIRE_AUTH_NONE;
+    if (p->ev2.active)         return NCI_DESFIRE_AUTH_EV2;
+    if (p->aes.active)         return NCI_DESFIRE_AUTH_AES;
+    if (p->legacy.session_len) return NCI_DESFIRE_AUTH_LEGACY;
+    if (p->lrp.active)         return NCI_DESFIRE_AUTH_LRP;
+    return NCI_DESFIRE_AUTH_NONE;
 }
 
 uint8_t nci_desfire_last_status(nci *p)
@@ -1613,6 +1741,17 @@ int nci_desfire_get_card_uid(nci *p, uint8_t uid[7])
 int nci_desfire_get_file_settings(nci *p, uint8_t file_no, uint8_t *out,
                                      size_t out_cap, size_t *out_len)
 {
+    /* N4.1: GetFileSettings under ANY active session, not only EV2 - the reader's
+     * deployed decks authenticate via legacy-AES (0xAA), so nci_desfire_file_info_get
+     * (and nci_desfire_read_file on top of it) must resolve the file's comm mode over
+     * the AES / legacy channels too. */
+    SESSION_CARD_GUARD(p);
+    if (p && p->aes.active)
+        return desfire_aes_get_file_settings(facade_apdu, p, &p->aes, file_no,
+                                             out, out_cap, out_len);
+    if (p && p->legacy.session_len)
+        return desfire_legacy_get_file_settings(facade_apdu, p, &p->legacy, file_no,
+                                                out, out_cap, out_len);
     if (!p || !p->ev2.active) return NCI_ERR;
     return desfire_ev2_get_file_settings(facade_apdu, p, &p->ev2, file_no,
                                          out, out_cap, out_len);
@@ -1639,9 +1778,6 @@ int nci_desfire_set_configuration(nci *p, uint8_t option,
     if (!p || !p->ev2.active) return NCI_ERR;
     return desfire_ev2_set_configuration(facade_apdu, p, &p->ev2, option, data, data_len);
 }
-
-
-#define EV2_GUARD(p) do { if (!(p) || !(p)->ev2.active) return NCI_ERR; } while (0)
 
 int nci_desfire_create_application(nci *p, uint32_t aid,
                                       uint8_t ks1, uint8_t ks2)
@@ -1707,6 +1843,7 @@ int nci_desfire_delete_file(nci *p, uint8_t file_no)
 int nci_desfire_write_data(nci *p, uint8_t comm, uint8_t file_no,
                               uint32_t offset, const uint8_t *data, uint32_t len)
 {
+    SESSION_CARD_GUARD(p);
     if (p && p->aes.active)
         return desfire_aes_write_data(facade_apdu, p, &p->aes, comm, file_no,
                                       offset, data, len);
@@ -1732,6 +1869,7 @@ int nci_desfire_read_data_comm(nci *p, uint8_t comm, uint8_t file_no,
                                   uint32_t offset, uint32_t length, uint8_t *out,
                                   size_t out_cap, size_t *out_len)
 {
+    SESSION_CARD_GUARD(p);
     if (p && p->aes.active)
         return desfire_aes_read_data(facade_apdu, p, &p->aes, comm, file_no,
                                      offset, length, out, out_cap, out_len);
@@ -1818,13 +1956,14 @@ int nci_desfire_create_value_file(nci *p, uint8_t file_no, uint8_t comm,
                                      uint16_t access, int32_t lower, int32_t upper,
                                      int32_t value, int limited_credit)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_create_value_file(facade_apdu, p, &p->ev2, file_no, comm,
                                          access, lower, upper, value, limited_credit);
 }
 
 int nci_desfire_get_value(nci *p, uint8_t comm, uint8_t file_no, int32_t *value)
 {
+    SESSION_CARD_GUARD(p);
     if (p && p->aes.active)
         return desfire_aes_get_value(facade_apdu, p, &p->aes, comm, file_no, value);
     if (p && p->legacy.session_len)
@@ -1835,20 +1974,20 @@ int nci_desfire_get_value(nci *p, uint8_t comm, uint8_t file_no, int32_t *value)
 
 int nci_desfire_credit(nci *p, uint8_t comm, uint8_t file_no, int32_t amount)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_credit(facade_apdu, p, &p->ev2, comm, file_no, amount);
 }
 
 int nci_desfire_debit(nci *p, uint8_t comm, uint8_t file_no, int32_t amount)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_debit(facade_apdu, p, &p->ev2, comm, file_no, amount);
 }
 
 int nci_desfire_limited_credit(nci *p, uint8_t comm, uint8_t file_no,
                                   int32_t amount)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_limited_credit(facade_apdu, p, &p->ev2, comm, file_no, amount);
 }
 
@@ -1908,19 +2047,19 @@ int nci_desfire_create_backup_data_file(nci *p, uint8_t file_no,
 
 int nci_desfire_commit_transaction(nci *p)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_commit_transaction(facade_apdu, p, &p->ev2, 0x00, NULL, NULL);
 }
 
 int nci_desfire_commit_transaction_tmac(nci *p, uint32_t *tmc, uint8_t tmv[8])
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_commit_transaction(facade_apdu, p, &p->ev2, 0x01, tmc, tmv);
 }
 
 int nci_desfire_abort_transaction(nci *p)
 {
-    EV2_GUARD(p);
+    EV2_VALUE_GUARD(p);
     return desfire_ev3_abort_transaction(facade_apdu, p, &p->ev2);
 }
 

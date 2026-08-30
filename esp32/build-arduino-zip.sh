@@ -29,6 +29,10 @@ for f in "$ROOT"/src/*.c "$ROOT"/src/*.h; do
 done
 cp "$ROOT"/src/chips/*.c          "$LIB/src/chips/"
 cp "$ROOT"/include/nci/*.h        "$LIB/src/nci/"      # public headers as <nci/...>
+# originality.c is OpenSSL-only (EVP/ECDSA) and is EXCLUDED above; shipping its
+# header would advertise nci_*originality* symbols that cannot link on ESP32
+# (mbedTLS backend). Drop the header so the package declares nothing unlinkable.
+rm -f "$LIB/src/nci/originality.h"
 cp "$ROOT"/include/libnci.h       "$LIB/src/libnci.h"  # top-level umbrella = Arduino discovery entry
 
 # ESP32 backends (Wire I2C, Arduino GPIO, mbedTLS crypto).

@@ -5,7 +5,7 @@
 // ...) and decodes the first record (Text / URI).
 
 #include <Wire.h>
-#include <nci/nci.h>
+#include <libnci.h>   // umbrella: attaches the libnci library, then <nci/...> resolves
 #include <nci/ndef.h>
 
 #define PIN_SDA      21

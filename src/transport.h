@@ -46,6 +46,15 @@ typedef struct {
 nci_transport *nci_transport_open(const nci_config *cfg);
 void              nci_transport_close(nci_transport *t);
 
+/* Open an nci device over a caller-supplied transport instead of a built-in bus.
+ * Standard NCI bring-up (CORE_RESET/INIT, RF_DISCOVER_MAP), no chipset configure
+ * hook, so the whole public nci_* device API drives over `t`. Available in EVERY
+ * build (hardware or headless): the test seam for exercising the device layer
+ * against a mock transport, and the entry point for a custom byte pipe. Ownership
+ * of `t` transfers to the returned handle. NULL on any bring-up failure. */
+struct nci;
+struct nci *nci_open_transport(nci_transport *t);
+
 /* ---- PN7160/PN71xx firmware download (DWL) ----------------------------- *
  * Entry points for the NXP firmware-download protocol (impl.txt #118), which
  * makes NCI_CAP_FW_UPDATE real beyond the DWL-pin reset choreography. In DWL

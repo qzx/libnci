@@ -72,4 +72,9 @@ int desfire_legacy_write_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,
 int desfire_legacy_get_value(apdu_fn fn, void *ctx, desfire_legacy_session *s,
                              uint8_t comm, uint8_t file_no, int32_t *value);
 
+/* GetFileSettings (0xF5): returns the raw settings bytes, MAC-verified. */
+int desfire_legacy_get_file_settings(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                                     uint8_t file_no, uint8_t *out, size_t out_cap,
+                                     size_t *out_len);
+
 #endif /* NCI_DESFIRE_LEGACY_H */

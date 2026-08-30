@@ -71,7 +71,7 @@ if hardware
                  'desfire-info', 'desfire-auth',
                  'desfire-manage', 'desfire-ev3-test', 'desfire-session-test',
                  'desfire-format-ndef', 'nfc-poll', 'ntag424-sdm', 'ntag424-provision',
-                 'desfire-dam']
+                 'desfire-dam', 'desfire-multicard']
     executable(app, 'apps' / (app + '.c'),
       include_directories: inc_public,
       link_with: nci_lib,
@@ -126,7 +126,8 @@ configure_file(
 
 # --- unit tests: pure layers, no libgpiod, no hardware --------------------
 test_nci = executable('test_nci',
-  ['tests/test_nci.c', 'src/nci.c', 'src/log.c'],
+  ['tests/test_nci.c', 'src/nci.c', 'src/log.c',
+   'src/chipset.c', 'src/chips/pn7160.c', 'src/chips/pn7150.c'],  # N8: PMU/reset config
   include_directories: inc_all)
 test('nci', test_nci)
 
@@ -285,6 +286,18 @@ test_originality = executable('test_originality',
   link_with: nci_lib,
   dependencies: nci_deps)
 test('originality', test_originality)
+
+# Multi-card session isolation on the PUBLIC path: a two-card DESFire simulator
+# wired in at the transport layer (nci_open_transport + a mock nci_transport)
+# drives nci_select_uid -> nci_desfire_authenticate_aes -> read the way a consumer
+# does, then proves activating the other card WIPES the session (N1) and that
+# nci_census enumerates both cards (N2/N3). Whole device closure -> link the lib.
+test_multicard = executable('test_multicard',
+  ['tests/test_multicard.c'],
+  include_directories: inc_all,
+  link_with: nci_lib,
+  dependencies: nci_deps)
+test('multicard', test_multicard)
 
 # Card emulation (listen-mode Type-4 NDEF tag): the pure C-APDU -> R-APDU
 # responder plus the session pump (PBF C-APDU reassembly, Conn-0 flow-control

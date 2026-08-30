@@ -60,8 +60,10 @@ const nci_chip nci_chip_pn7150 = {
         .name             = "pn7150",
         .description      = "NXP PN7150 NCI 1.0 NFC controller",
         .default_i2c_addr = 0x28,
-        .caps             = NCI_CAP_ISO_DEP | NCI_CAP_NFC_DEP |
-                            NCI_CAP_CE | NCI_CAP_FW_UPDATE,
+        /* No NCI_CAP_FW_UPDATE: DWL firmware download is only stubbed (see
+         * transport.h / pn7160.c) - the cap stays cleared until it is implemented
+         * and bench-verified, so nci_dev_caps never over-promises. */
+        .caps             = NCI_CAP_ISO_DEP | NCI_CAP_NFC_DEP | NCI_CAP_CE,
     },
     .transport_open = nci_transport_open,
     .configure      = pn7150_configure,

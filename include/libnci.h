@@ -19,5 +19,6 @@
 #include <nci/nci.h>
 #include <nci/kdf.h>
 #include <nci/p2p.h>
+#include <nci/esp32.h>   /* nci_esp32_spi_set_pins (SPI rig pin selection) */
 
 #endif /* LIBNCI_UMBRELLA_H */

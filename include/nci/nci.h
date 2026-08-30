@@ -46,6 +46,8 @@ typedef enum {
     NCI_E_STATUS   = -11,   /* card/NFCC returned an error status byte      */
     NCI_E_NO_TAG   = -12,   /* no tag currently activated                   */
     NCI_E_ABORTED  = -13,   /* operation aborted by the caller              */
+    NCI_E_SESSION_CARD_MISMATCH = -14, /* secure op on a session bound to a  */
+                            /* different card than the one now activated     */
 } nci_status;
 
 /* Human-readable, never NULL, valid for the program lifetime. */
@@ -211,10 +213,13 @@ int nci_start_discovery(nci *d, uint32_t tech_mask);
 int nci_poll(nci *d, nci_tag *out, int timeout_ms);
 
 /* When nci_poll reported out->more, additional tags are in the field. Select
- * the next one (or by explicit disc_id) so it becomes the active tag.
- * (impl.txt #2-3) */
+ * the next one (or by explicit disc_id) so it becomes the active tag; *out is
+ * filled from the activation NTF so the caller can confirm which card it got.
+ * The disc_id is only valid WITHIN the current discovery round (the one the
+ * preceding nci_poll/nci_list_targets reported); it does NOT survive a census or
+ * a re-arm - use nci_select_uid to select across cycles. (impl.txt #2-3) */
 int nci_select_next_tag(nci *d, nci_tag *out);
-int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol);
+int nci_select_tag(nci *d, uint8_t disc_id, nci_protocol protocol, nci_tag *out);
 
 /* Activate the card with this exact UID, from ANY prior RF state: runs its own
  * fresh discover/census/select cycle (disc_ids only live within one round) with
@@ -224,13 +229,21 @@ int nci_select_uid(nci *d, const uint8_t *uid, uint8_t uid_len, nci_tag *out);
 
 /* Enumerate the field like nci_list_targets, but as a COMPLETE fresh cycle:
  * callable from any prior RF state, repeatable, and discovery is re-armed on
- * return so ordinary polling keeps working. (two-card sandwich) */
+ * return so ordinary polling keeps working. (two-card sandwich)
+ *
+ * LIFETIME CONTRACT (N2.1): the returned rows carry each card's IDENTITY (UID,
+ * protocol, tech_mode, sak) but the disc_id field is ZEROED - re-arming ends the
+ * discovery round the ids belonged to, so they are never selectable after this
+ * call. Select a censused card by UID with nci_select_uid(); that is the only
+ * cross-call selector. (nci_select_tag's disc_id is for the SAME round only,
+ * i.e. straight after nci_poll/nci_list_targets, before any census/re-arm.) */
 int nci_census(nci *d, nci_tag *out, size_t cap, int timeout_ms);
 
 /* Enumerate every tag the last multi-target poll detected, without activating
  * any. Fills up to `cap` descriptors (disc_id, protocol, tech_mode, uid, sak)
- * and returns the total number in the field (which may exceed `cap`). Use the
- * disc_id/protocol of a chosen entry with nci_select_tag(). (impl.txt #2) */
+ * and returns the total number in the field (which may exceed `cap`). The
+ * disc_id is valid only within THIS discovery round: use it with nci_select_tag()
+ * before any deactivate/census/re-arm; otherwise select by UID. (impl.txt #2) */
 int nci_list_targets(nci *d, nci_tag *out, size_t cap);
 
 /* Is a tag still in the field? Cheap ISO-DEP/NFC presence check. (#4) */

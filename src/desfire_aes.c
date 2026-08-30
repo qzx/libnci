@@ -353,3 +353,21 @@ int desfire_aes_get_value(apdu_fn fn, void *ctx, desfire_aes_session *s,
                            ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24));
     return NCI_OK;
 }
+
+int desfire_aes_get_file_settings(apdu_fn fn, void *ctx, desfire_aes_session *s,
+                                  uint8_t file_no, uint8_t *out, size_t out_cap,
+                                  size_t *out_len)
+{
+    if (!s) return NCI_ERR;
+    /* GetFileSettings (0xF5): the file number is sent plain; the settings bytes
+     * come back MAC-protected under the running session key (an authenticated
+     * AS_NEW session always MACs responses). aes_transact verifies+strips it. */
+    uint8_t buf[64]; size_t n = 0;
+    if (aes_transact(fn, ctx, s, 0xF5, &file_no, 1, NULL, 0, TX_PLAIN, RX_MAC,
+                     buf, sizeof buf, &n) != NCI_OK)
+        return NCI_ERR;
+    if (n > out_cap) n = out_cap;
+    if (n) memcpy(out, buf, n);
+    if (out_len) *out_len = n;
+    return NCI_OK;
+}

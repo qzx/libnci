@@ -4,7 +4,7 @@
 // Like nfc_detect, but also cycles through multiple tags in the field at once.
 
 #include <Wire.h>
-#include <nci/nci.h>
+#include <libnci.h>   // umbrella: attaches the libnci library, then <nci/...> resolves
 
 #define PIN_SDA      21
 #define PIN_SCL      22

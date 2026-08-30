@@ -264,6 +264,7 @@ int desfire_auth_legacy(apdu_fn fn, void *ctx, uint8_t key_no,
 #define INS_READ_DATA  0xBD
 #define INS_WRITE_DATA 0x3D
 #define INS_GET_VALUE  0x6C
+#define INS_GET_FILE_SETTINGS 0xF5
 
 static void le24(uint8_t *p, uint32_t v)
 {
@@ -481,6 +482,17 @@ int desfire_legacy_get_value(apdu_fn fn, void *ctx, desfire_legacy_session *s,
         *value = (int32_t)((uint32_t)out[0] | ((uint32_t)out[1] << 8) |
                            ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24));
     return NCI_OK;
+}
+
+int desfire_legacy_get_file_settings(apdu_fn fn, void *ctx, desfire_legacy_session *s,
+                                     uint8_t file_no, uint8_t *out, size_t out_cap,
+                                     size_t *out_len)
+{
+    /* GetFileSettings (0xF5): file number sent plain; the variable-length settings
+     * come back MAC-protected under an authenticated AS_NEW session (comm=MAC drives
+     * the CMAC verify+strip; length 0 = take whatever the card returns). */
+    return legacy_recv_protected(fn, ctx, s, INS_GET_FILE_SETTINGS, &file_no, 1,
+                                 NCI_DESFIRE_MAC, 0, out, out_cap, out_len);
 }
 
 int desfire_legacy_write_data(apdu_fn fn, void *ctx, desfire_legacy_session *s,

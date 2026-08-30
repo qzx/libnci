@@ -59,4 +59,10 @@ int desfire_aes_write_data(apdu_fn fn, void *ctx, desfire_aes_session *s,
 int desfire_aes_get_value(apdu_fn fn, void *ctx, desfire_aes_session *s,
                           uint8_t comm, uint8_t file_no, int32_t *value);
 
+/* GetFileSettings (0xF5) under the session: returns the raw settings bytes
+ * (type, comm mode, access rights, size/record params) MAC-verified. */
+int desfire_aes_get_file_settings(apdu_fn fn, void *ctx, desfire_aes_session *s,
+                                  uint8_t file_no, uint8_t *out, size_t out_cap,
+                                  size_t *out_len);
+
 #endif /* NCI_DESFIRE_AES_H */

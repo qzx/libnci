@@ -9,10 +9,17 @@
 #include "nci.h"
 #include "transport.h"
 #include "nci/nci.h"
+#include "chipset.h"        /* nci_chip_pn7160 (N8: PMU/reset config coverage) */
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+/* The chip structs reference nci_transport_open (the real I2C/SPI+gpiod bus),
+ * which is hardware-only and not linked into this host test. We drive the chip
+ * `configure` hook over the mock transport directly, so stub the bus opener. */
+nci_transport *nci_transport_open(const nci_config *cfg) { (void)cfg; return NULL; }
+void nci_transport_close(nci_transport *t) { (void)t; }
 
 /* ---- a mock transport: a FIFO of canned response packets -------- */
 #define MAX_RESP   16
@@ -449,6 +456,85 @@ static void test_deactivate_modes(void)
     printf("  deactivate_modes: OK (Sleep=0x01)\n");
 }
 
+/* N8.1: CORE_RESET carries the requested reset_type byte (0x00 keep-config after
+ * SET_CONFIG, 0x01 clean bring-up). This is the wiring the pn7160 apply-reset and
+ * nci_open's cold boot rely on. */
+static void test_core_reset_type(void)
+{
+    for (uint8_t rt = 0; rt <= 1; rt++) {
+        mock m = {0};
+        nci_transport t = { .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset };
+        mock_push(&m, RESET_RSP, sizeof RESET_RSP);
+        mock_push(&m, RESET_NTF, sizeof RESET_NTF);
+        assert(nci_core_reset(&t, NULL, rt) == NCI_OK);
+        assert(m.wr[0][0] == 0x20 && m.wr[0][1] == 0x00);   /* CORE_RESET       */
+        assert(m.wr[0][2] == 0x01);                         /* payload length 1 */
+        assert(m.wr[0][3] == rt);                           /* reset_type byte  */
+    }
+    printf("  core_reset_type: OK (0x00 keep / 0x01 reset)\n");
+}
+
+/* N8.1: the PN7160 configure hook emits the 5 V PMU/TXLDO CORE_SET_CONFIG (PMU_CFG
+ * 0xA00E) plus TOTAL_DURATION, then re-applies with a KEEP-config CORE_RESET so the
+ * EEPROM values take effect. Without this PMU_CFG the TX driver refuses to start
+ * (RF_TXLDO_ERROR) and no RF field is generated - so the exact bytes are pinned. */
+static void test_pn7160_pmu_config(void)
+{
+    static const uint8_t SETCFG_RSP[] = { 0x40, 0x02, 0x02, 0x00, 0x00 };
+    mock m = {0};
+    nci_transport t = { .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset };
+    /* configure() sends CORE_SET_CONFIG, then nci_core_reset (RSP+NTF), then INIT. */
+    mock_push(&m, SETCFG_RSP, sizeof SETCFG_RSP);
+    mock_push(&m, RESET_RSP,  sizeof RESET_RSP);
+    mock_push(&m, RESET_NTF,  sizeof RESET_NTF);
+    mock_push(&m, INIT_RSP,   sizeof INIT_RSP);
+
+    nci_dev_info info = { .nci_version = 0x20 };
+    assert(nci_chip_pn7160.configure != NULL);
+    assert(nci_chip_pn7160.configure(&t, &info) == NCI_OK);
+
+    /* write[0] = CORE_SET_CONFIG with 2 params. */
+    assert(m.wr[0][0] == 0x20 && m.wr[0][1] == 0x02);       /* CORE_SET_CONFIG   */
+    assert(m.wr[0][3] == 0x02);                             /* 2 config params   */
+    /* param 1: TOTAL_DURATION (0x00) = 1000 ms (0x03E8 LE). */
+    assert(m.wr[0][4] == 0x00 && m.wr[0][5] == 0x02);
+    assert(m.wr[0][6] == 0xE8 && m.wr[0][7] == 0x03);
+    /* param 2: PMU_CFG (0xA00E), 11-byte value; byte7 = TXLDO 0xBF (5 V rail),
+     * byte9 = 0xD0 (5 V-check enabled) - the AN12988 CFG2 5 V values. */
+    assert(m.wr[0][8] == 0xA0 && m.wr[0][9] == 0x0E && m.wr[0][10] == 0x0B);
+    assert(m.wr[0][11 + 7] == 0xBF);                        /* TXLDO 4.7 V       */
+    assert(m.wr[0][11 + 9] == 0xD0);                        /* 5 V-check enabled */
+    /* write[1] = the apply CORE_RESET with KEEP-config (reset_type 0x00). */
+    assert(m.wr[1][0] == 0x20 && m.wr[1][1] == 0x00 && m.wr[1][3] == 0x00);
+    /* write[2] = CORE_INIT. */
+    assert(m.wr[2][0] == 0x20 && m.wr[2][1] == 0x01);
+    printf("  pn7160_pmu_config: OK (PMU 0xA00E 5V TXLDO + keep-config apply reset)\n");
+}
+
+/* N7.1: nci_set_p2p_gen_bytes emits the LLCP ATR general bytes - magic 'Ffm'
+ * (0x46 0x66 0x6D) + VERSION/WKS/LTO - as BOTH the initiator (PN_ATR_REQ, 0x29)
+ * and target (LN_ATR_RES, 0x61) CORE_SET_CONFIG params, so a peer can bind the
+ * LLCP link + its SNEP service. (The LLCP/SNEP codecs themselves are in test_p2p.) */
+static void test_p2p_gen_bytes(void)
+{
+    static const uint8_t SETCFG_RSP[] = { 0x40, 0x02, 0x02, 0x00, 0x00 };
+    mock m = {0};
+    nci_transport t = { .ctx = &m, .write = mock_write, .read = mock_read, .reset = mock_reset };
+    mock_push(&m, SETCFG_RSP, sizeof SETCFG_RSP);
+    assert(nci_set_p2p_gen_bytes(&t) == NCI_OK);
+
+    assert(m.wr[0][0] == 0x20 && m.wr[0][1] == 0x02);       /* CORE_SET_CONFIG   */
+    assert(m.wr[0][3] == 0x02);                             /* 2 config params   */
+    /* param 1: PN_ATR_REQ_GEN_BYTES (0x29), 13-byte value, LLCP magic 'Ffm'. */
+    assert(m.wr[0][4] == 0x29 && m.wr[0][5] == 0x0D);
+    assert(m.wr[0][6] == 0x46 && m.wr[0][7] == 0x66 && m.wr[0][8] == 0x6D);
+    /* param 2: LN_ATR_RES_GEN_BYTES (0x61) follows the 13 gen bytes, same magic. */
+    assert(m.wr[0][6 + 13] == 0x61 && m.wr[0][6 + 13 + 1] == 0x0D);
+    assert(m.wr[0][6 + 13 + 2] == 0x46 && m.wr[0][6 + 13 + 3] == 0x66 &&
+           m.wr[0][6 + 13 + 4] == 0x6D);
+    printf("  p2p_gen_bytes: OK (LLCP 'Ffm' magic, ATR REQ 0x29 + RES 0x61)\n");
+}
+
 int main(void)
 {
     printf("test_nci:\n");
@@ -464,6 +550,9 @@ int main(void)
     test_poll_multi();
     test_discover_select();
     test_deactivate_modes();
+    test_core_reset_type();
+    test_pn7160_pmu_config();
+    test_p2p_gen_bytes();
     printf("all tests passed\n");
     return 0;
 }

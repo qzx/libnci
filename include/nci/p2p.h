@@ -290,11 +290,18 @@ int nci_snep_get_link(nci_llcp_link_fn link, void *ctx,
                       const uint8_t *req_ndef, size_t req_len,
                       uint8_t *out, size_t cap, size_t *out_len);
 
-/* Start symmetric P2P: advertise LLCP in the ATR general bytes, then arm
+/* Start symmetric P2P: advertise LLCP in the ATR general bytes (magic 'Ffm' +
+ * VERSION/WKS/LTO, via nci_set_p2p_gen_bytes - host-tested in test_nci), then arm
  * poll+listen NFC-DEP discovery so two peers auto-negotiate initiator/target.
  * When a peer activates on the NFC-DEP RF interface (nci_poll returns a tag with
  * protocol NFC-DEP), use nci_p2p_is_target() to pick nci_snep_put/get (initiator)
- * vs nci_snep_serve (target). */
+ * vs nci_snep_serve (target). The LLCP/SNEP codecs are host-tested in test_p2p.
+ *
+ * BENCH LOOPBACK (PENDING-HARDWARE): flash two C6 boards with esp32/examples/
+ * nfc_p2p (one built USE_SPI 1, one USE_SPI 0) and face their antennas. Wiring:
+ *   SPI board - SCK 6, MISO 2, MOSI 7, CS 3, VEN 18, IRQ 1, DWL 0
+ *   I2C board - SDA 20, SCL 19, VEN 18, IRQ 2, DWL 3
+ * Each cycle the initiator SNEP-PUTs a text NDEF; the target prints it. */
 int nci_p2p_start(nci *d);
 
 /* True when the active link is NFC-DEP and this device is the target (listen
